@@ -1,0 +1,5 @@
+streamlit
+anthropic
+google-generativeai
+python-docx
+Pillow
