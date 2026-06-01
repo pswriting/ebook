@@ -1,10 +1,25 @@
+# -*- coding: utf-8 -*-
+import os
+import logging
+
+# 환경 변수
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+# 로깅 비활성화
+logging.getLogger('anthropic').setLevel(logging.ERROR)
+logging.getLogger('httpx').setLevel(logging.ERROR)
+
 import streamlit as st
 import re
 import json
 import html
 import base64
 import urllib.parse
-from datetime import datetime
+import uuid
+import platform
+import hashlib
+import requests
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Claude API
@@ -31,6 +46,20 @@ try:
     YOUTUBE_TRANSCRIPT_AVAILABLE = True
 except ImportError:
     YOUTUBE_TRANSCRIPT_AVAILABLE = False
+
+# 브라우저 ID용 (클라우드 배포 시 필요)
+try:
+    from streamlit_javascript import st_javascript
+    BROWSER_ID_AVAILABLE = True
+except ImportError:
+    BROWSER_ID_AVAILABLE = False
+
+# 쿠키 매니저 (데이터 저장용)
+try:
+    import extra_streamlit_components as stx
+    COOKIE_AVAILABLE = True
+except ImportError:
+    COOKIE_AVAILABLE = False
 
 # Word 문서 생성용
 try:
@@ -82,6 +111,12 @@ def is_authenticated():
 def save_authenticated():
     save_config({'authenticated': True})
 
+# ==========================================
+# 간단 비밀번호 인증
+# ==========================================
+CORRECT_PASSWORD = "cashmaker2024"  # ← 비밀번호 변경하려면 여기만 수정
+
+
 # 비디오 배경용 base64 인코딩
 @st.cache_data
 def get_video_base64(video_path):
@@ -92,6 +127,66 @@ def get_video_base64(video_path):
         return None
 
 st.set_page_config(page_title="Writey", layout="wide", page_icon="✍")
+
+# 쿠키 매니저 초기화 및 데이터 불러오기/저장
+# 승인 유효기간: 365일 + 롤링 만료 (방문할 때마다 자동 갱신)
+COOKIE_LIFETIME_DAYS = 365  # 한 번 로그인 후 365일 유지. 방문할 때마다 자동 연장됨
+
+if COOKIE_AVAILABLE:
+    import time
+    cookie_manager = stx.CookieManager(key="writey_cookies")
+    cookies = cookie_manager.get_all()
+
+    # [중요] CookieManager는 새 세션의 '첫 실행'에서는 브라우저와의 통신이 끝나기 전이라
+    # 쿠키가 실제로 있어도 빈 dict({})를 반환한다. 그 상태로 자동 로그인을 판정하면
+    # 항상 로그인 화면이 떠서 "로그인 정보가 기억되지 않는" 증상이 발생한다.
+    # → 첫 실행에서 쿠키가 비어 있으면 딱 한 번만 재실행해서 쿠키를 읽을 기회를 준다.
+    if not cookies and not st.session_state.get('_cookie_loaded'):
+        st.session_state['_cookie_loaded'] = True
+        time.sleep(0.3)
+        st.rerun()
+    st.session_state['_cookie_loaded'] = True
+
+    # 쿠키에서 비밀번호/API키 복원
+    if cookies:
+        if 'writey_password' in cookies and cookies['writey_password']:
+            if 'saved_password' not in st.session_state:
+                st.session_state['saved_password'] = cookies['writey_password']
+        if 'writey_api_key' in cookies and cookies['writey_api_key']:
+            if 'saved_api_key' not in st.session_state:
+                st.session_state['saved_api_key'] = cookies['writey_api_key']
+
+    # 롤링 만료: 매 세션마다 만료일 연장
+    if 'cookie_rolling_refreshed' not in st.session_state:
+        if st.session_state.get('saved_password'):
+            st.session_state['pending_save_password'] = st.session_state['saved_password']
+        if st.session_state.get('saved_api_key'):
+            st.session_state['pending_save_api'] = st.session_state['saved_api_key']
+        st.session_state['cookie_rolling_refreshed'] = True
+
+    # pending 값을 쿠키에 저장
+    if 'pending_save_password' in st.session_state:
+        cookie_manager.set('writey_password', st.session_state['pending_save_password'], expires_at=datetime.now() + timedelta(days=COOKIE_LIFETIME_DAYS))
+        del st.session_state['pending_save_password']
+    if 'pending_save_api' in st.session_state:
+        cookie_manager.set('writey_api_key', st.session_state['pending_save_api'], expires_at=datetime.now() + timedelta(days=COOKIE_LIFETIME_DAYS))
+        del st.session_state['pending_save_api']
+else:
+    cookie_manager = None
+
+def save_password_to_browser(password):
+    """비밀번호를 쿠키에 저장"""
+    st.session_state['saved_password'] = password
+    st.session_state['pending_save_password'] = password
+
+def save_api_key_to_browser(api_key):
+    """API 키를 쿠키에 저장"""
+    st.session_state['saved_api_key'] = api_key
+    st.session_state['pending_save_api'] = api_key
+
+def get_saved_api_key():
+    """저장된 API 키 반환"""
+    return st.session_state.get('saved_api_key', None)
 
 # ==========================================
 # APPLE STYLE CSS
@@ -152,22 +247,24 @@ st.markdown("""
 }
 
 :root {
-    --gold: #d4af37;
-    --gold-light: #f4e4bc;
-    --gold-dark: #996515;
+    --gold: #C9A24B;
+    --gold-light: #E0C074;
+    --gold-dark: #A8852F;
     --rose-gold: #b76e79;
-    --cream: #faf7f2;
-    --charcoal: #1a1a1a;
-    --dark: #0a0a0a;
-    --card: rgba(20,20,20,0.9);
-    --card2: rgba(30,30,30,0.9);
-    --text: #f5f5f5;
-    --text2: #888888;
-    --line: rgba(212,175,55,0.2);
-    --glow: rgba(212,175,55,0.4);
-    --success: #50c878;
-    --warning: #ffb347;
-    --danger: #ff6b6b;
+    --cream: #FAF8F4;
+    --charcoal: #141416;
+    --dark: #0B0B0D;
+    --card: rgba(255,255,255,0.025);
+    --card2: rgba(255,255,255,0.05);
+    --text: #F5F3EF;
+    --text2: #8A8780;
+    --text3: #7A776F;
+    --line: rgba(201,162,75,0.18);
+    --line2: rgba(255,255,255,0.06);
+    --glow: rgba(201,162,75,0.32);
+    --success: #6FA86F;
+    --warning: #E0C074;
+    --danger: #C97A6F;
 }
 
 /* 애니메이션 정의 */
@@ -184,8 +281,8 @@ st.markdown("""
     50% { opacity: 0.8; transform: scale(1.02); }
 }
 @keyframes borderGlow {
-    0%, 100% { box-shadow: 0 0 5px var(--glow), inset 0 0 5px rgba(212,175,55,0.1); }
-    50% { box-shadow: 0 0 20px var(--glow), inset 0 0 10px rgba(212,175,55,0.2); }
+    0%, 100% { box-shadow: 0 0 5px var(--glow), inset 0 0 5px rgba(201,162,75,0.1); }
+    50% { box-shadow: 0 0 20px var(--glow), inset 0 0 10px rgba(201,162,75,0.2); }
 }
 @keyframes float {
     0%, 100% { transform: translateY(0); }
@@ -196,15 +293,25 @@ st.markdown("""
     100% { background-position: 200% 0; }
 }
 
-* { font-family: 'S-CoreDream', 'Pretendard', -apple-system, sans-serif !important; }
-.stDeployButton, footer, #MainMenu, header[data-testid="stHeader"] { display: none !important; }
+*:not([data-testid*="Icon"]):not(.material-icons):not([class*="icon"]):not(span[aria-hidden="true"]) {
+    font-family: 'S-CoreDream', 'Pretendard', -apple-system, sans-serif !important;
+}
+/* 아이콘 폰트 복원 */
+[data-testid*="Icon"], .material-icons, span[aria-hidden="true"], button[kind="header"] span {
+    font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
+}
+.stDeployButton, footer, #MainMenu { display: none !important; }
+/* 헤더 투명하게 (사이드바 버튼은 보임) */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
 
 /* 럭셔리 배경 - 미세한 그라데이션 */
 .stApp {
     background:
-        radial-gradient(ellipse at 20% 0%, rgba(212,175,55,0.03) 0%, transparent 50%),
-        radial-gradient(ellipse at 80% 100%, rgba(183,110,121,0.03) 0%, transparent 50%),
-        linear-gradient(180deg, #0a0a0a 0%, #050505 50%, #0a0a0a 100%) !important;
+        radial-gradient(ellipse at 20% 0%, rgba(201,162,75,0.04) 0%, transparent 55%),
+        radial-gradient(ellipse at 80% 100%, rgba(201,162,75,0.025) 0%, transparent 55%),
+        linear-gradient(180deg, #0B0B0D 0%, #08080A 50%, #0B0B0D 100%) !important;
     background-attachment: fixed;
 }
 
@@ -218,28 +325,33 @@ st.markdown("""
 [data-testid="stSidebar"] * { color: var(--text2) !important; }
 
 /* 타이포그래피 - 가독성 향상 */
-h1, h2, h3 { color: var(--text) !important; font-weight: 400 !important; letter-spacing: 1px; }
-h1 { font-size: 36px !important; color: var(--cream) !important; }
-h2 { font-size: 28px !important; margin-bottom: 20px !important; }
-h3 { font-size: 22px !important; color: var(--gold) !important; }
+h1, h2, h3 { color: var(--text) !important; font-weight: 300 !important; letter-spacing: 0.5px; }
+h1 { font-size: 34px !important; color: var(--cream) !important; font-weight: 300 !important; }
+h2 { font-size: 26px !important; margin-bottom: 20px !important; font-weight: 300 !important; }
+h3 { font-size: 21px !important; color: var(--gold) !important; font-weight: 400 !important; }
 p, span, label, div { color: var(--text) !important; font-size: 16px !important; line-height: 1.7 !important; }
 li { font-size: 16px !important; line-height: 1.8 !important; }
 
-/* 버튼 - 럭셔리 골드 + 고급 효과 */
+/* 버튼 - 채워진 골드 그라데이션 (첨부 디자인) */
 .stButton > button {
-    background: linear-gradient(135deg, rgba(212,175,55,0.1) 0%, transparent 50%, rgba(212,175,55,0.1) 100%) !important;
-    color: var(--gold) !important;
-    border: 1px solid var(--gold) !important;
-    border-radius: 4px;
+    background: linear-gradient(135deg, #E0C074 0%, #C9A24B 100%) !important;
+    color: #0B0B0D !important;
+    -webkit-text-fill-color: #0B0B0D !important;
+    border: none !important;
+    border-radius: 12px;
     font-weight: 600;
-    font-size: 16px !important;
-    padding: 18px 40px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    font-size: 15px !important;
+    padding: 15px 36px;
+    letter-spacing: 0.4px;
+    text-transform: none;
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
-    box-shadow: 0 2px 10px rgba(212,175,55,0.1);
+    box-shadow: 0 6px 20px rgba(201,162,75,0.22);
+}
+.stButton > button * {
+    color: #0B0B0D !important;
+    -webkit-text-fill-color: #0B0B0D !important;
 }
 .stButton > button::before {
     content: '';
@@ -248,42 +360,28 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     left: -100%;
     width: 100%;
     height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(212,175,55,0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent);
     transition: left 0.6s ease;
 }
 .stButton > button:hover::before {
     left: 100%;
 }
-.stButton > button::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(135deg, var(--gold) 0%, var(--gold-dark) 50%, var(--gold) 100%);
-    opacity: 0;
-    transition: opacity 0.4s ease;
-    z-index: -1;
-}
 .stButton > button:hover {
-    color: var(--dark) !important;
-    border-color: var(--gold-light) !important;
-    box-shadow: 0 8px 30px rgba(212,175,55,0.4), 0 0 20px rgba(212,175,55,0.2);
-    transform: translateY(-3px);
-    text-shadow: 0 1px 2px rgba(0,0,0,0.3);
-}
-.stButton > button:hover::after {
-    opacity: 1;
+    background: linear-gradient(135deg, #EBCE86 0%, #D4AC56 100%) !important;
+    box-shadow: 0 10px 32px rgba(201,162,75,0.4);
+    transform: translateY(-2px);
 }
 .stButton > button:active {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 15px rgba(212,175,55,0.3);
+    transform: translateY(0);
+    box-shadow: 0 4px 15px rgba(201,162,75,0.3);
 }
 
 /* 입력 필드 - 밝은 배경 + 검은 글씨 */
 .stTextInput input, .stTextArea textarea, .stNumberInput input {
     background: #ffffff !important;
     background-color: #ffffff !important;
-    border: 1px solid var(--line) !important;
-    border-radius: 6px !important;
+    border: 0.5px solid var(--line) !important;
+    border-radius: 10px !important;
     color: #000000 !important;
     -webkit-text-fill-color: #000000 !important;
     caret-color: #000000 !important;
@@ -292,14 +390,14 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 }
 .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
     border-color: var(--gold) !important;
-    box-shadow: 0 0 0 2px rgba(212,175,55,0.2) !important;
+    box-shadow: 0 0 0 2px rgba(201,162,75,0.2) !important;
 }
 
 /* 셀렉트박스 컨테이너 */
 .stSelectbox > div > div {
     background: var(--card) !important;
-    border: 1px solid var(--line) !important;
-    border-radius: 0;
+    border: 0.5px solid var(--line) !important;
+    border-radius: 10px;
 }
 /* 셀렉트박스 선택된 값 - 흰색 */
 .stSelectbox [data-baseweb="select"] > div {
@@ -310,7 +408,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 /* 스코어 카드 - 럭셔리 */
 .score-card {
     background: linear-gradient(145deg, var(--card) 0%, rgba(30,30,30,0.95) 100%) !important;
-    border: 2px solid var(--gold);
+    border: 0.5px solid var(--gold);
     border-radius: 20px;
     padding: 50px 40px;
     text-align: center;
@@ -318,7 +416,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
-    box-shadow: 0 10px 40px rgba(212,175,55,0.15);
+    box-shadow: 0 10px 40px rgba(201,162,75,0.15);
 }
 .score-card::before {
     content: '';
@@ -332,7 +430,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 }
 .score-card:hover {
     border-color: var(--gold);
-    box-shadow: 0 20px 60px rgba(212,175,55,0.3), inset 0 1px 0 rgba(212,175,55,0.1);
+    box-shadow: 0 20px 60px rgba(201,162,75,0.3), inset 0 1px 0 rgba(201,162,75,0.1);
     transform: translateY(-5px);
 }
 .score-card:hover::before {
@@ -348,7 +446,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     line-height: 1;
     letter-spacing: -4px;
     animation: fadeInUp 0.8s ease-out;
-    filter: drop-shadow(0 2px 4px rgba(212,175,55,0.3));
+    filter: drop-shadow(0 2px 4px rgba(201,162,75,0.3));
 }
 
 /* 정보 카드 + 애니메이션 */
@@ -370,7 +468,8 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 /* 스탯 박스 + 애니메이션 */
 .stat-box {
     background: var(--card) !important;
-    border: 1px solid var(--line);
+    border: 0.5px solid var(--line2);
+    border-radius: 14px;
     padding: 32px;
     text-align: center;
     animation: fadeInUp 0.5s ease-out;
@@ -416,7 +515,8 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 /* 서머리 허브 + 애니메이션 */
 .summary-hub {
     background: var(--card) !important;
-    border: 1px solid var(--line);
+    border: 0.5px solid var(--line2);
+    border-radius: 14px;
     padding: 40px;
     animation: fadeInUp 0.5s ease-out;
     transition: all 0.4s ease;
@@ -431,6 +531,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     color: var(--success) !important;
     border: 1px solid var(--success);
     padding: 12px 32px;
+    border-radius: 20px;
     font-weight: 400;
     font-size: 12px;
     letter-spacing: 3px;
@@ -442,6 +543,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     color: var(--warning) !important;
     border: 1px solid var(--warning);
     padding: 12px 32px;
+    border-radius: 20px;
     font-weight: 400;
     font-size: 12px;
     letter-spacing: 3px;
@@ -452,6 +554,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     color: var(--danger) !important;
     border: 1px solid var(--danger);
     padding: 12px 32px;
+    border-radius: 20px;
     font-weight: 400;
     font-size: 12px;
     letter-spacing: 3px;
@@ -475,67 +578,53 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     transition: all 0.3s ease;
 }
 .nav-item.active {
-    background: linear-gradient(135deg, rgba(212,175,55,0.2) 0%, rgba(212,175,55,0.1) 100%);
+    background: linear-gradient(135deg, rgba(201,162,75,0.2) 0%, rgba(201,162,75,0.1) 100%);
     color: var(--gold) !important;
     font-weight: 600;
     border-bottom: 3px solid var(--gold);
-    box-shadow: 0 4px 15px rgba(212,175,55,0.2);
+    box-shadow: 0 4px 15px rgba(201,162,75,0.2);
 }
 
-/* 섹션 타이틀 - 화려하게 */
+/* 섹션 타이틀 - 미니멀 (첨부 디자인) */
 .section-title-box {
-    background: linear-gradient(135deg, rgba(212,175,55,0.15) 0%, rgba(183,110,121,0.1) 50%, rgba(212,175,55,0.15) 100%);
-    border: 2px solid rgba(212,175,55,0.4);
-    border-radius: 16px;
-    padding: 30px 40px;
+    background: rgba(255,255,255,0.025);
+    border: 0.5px solid var(--line2);
+    border-radius: 14px;
+    padding: 30px 36px;
     margin-bottom: 35px;
-    text-align: center;
+    text-align: left;
     position: relative;
     overflow: hidden;
     animation: fadeInUp 0.5s ease-out;
 }
-.section-title-box::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 200%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(212,175,55,0.1), transparent);
-    animation: shimmer 3s ease-in-out infinite;
-}
 .section-title-box h2 {
-    font-size: 32px !important;
-    background: linear-gradient(135deg, var(--gold-light) 0%, var(--gold) 50%, var(--gold-dark) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin: 0 0 10px 0 !important;
-    font-weight: 600 !important;
-    letter-spacing: 3px;
+    font-size: 26px !important;
+    color: #FAF8F4 !important;
+    margin: 0 0 8px 0 !important;
+    font-weight: 300 !important;
+    letter-spacing: 0.5px;
 }
 .section-title-box p {
-    color: var(--text) !important;
-    font-size: 17px !important;
+    color: var(--text2) !important;
+    font-size: 14px !important;
     margin: 0 !important;
-    opacity: 0.85;
 }
 .section-step {
     display: inline-block;
-    background: var(--gold);
-    color: var(--dark) !important;
-    font-size: 13px;
-    font-weight: 700;
-    padding: 6px 16px;
-    border-radius: 20px;
-    margin-bottom: 15px;
-    letter-spacing: 2px;
+    background: transparent;
+    color: var(--gold) !important;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 0;
+    margin-bottom: 12px;
+    letter-spacing: 0.22em;
 }
 
 /* 제목 카드 + 애니메이션 */
 .title-card {
-    background: transparent;
-    border: 1px solid var(--line);
+    background: var(--card);
+    border: 0.5px solid var(--line2);
+    border-radius: 12px;
     padding: 28px;
     margin: 16px 0;
     transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -568,12 +657,13 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     max-width: 420px;
     margin: 100px auto;
     padding: 70px 50px;
-    background: linear-gradient(145deg, rgba(25,25,25,0.98) 0%, rgba(15,15,15,0.98) 100%);
-    border: 1px solid var(--line);
+    background: linear-gradient(145deg, rgba(26,26,31,0.98) 0%, rgba(11,11,13,0.98) 100%);
+    border: 0.5px solid var(--line);
+    border-radius: 16px;
     text-align: center;
     animation: fadeInUp 0.8s ease-out;
     position: relative;
-    box-shadow: 0 25px 80px rgba(0,0,0,0.5), 0 0 40px rgba(212,175,55,0.05);
+    box-shadow: 0 25px 80px rgba(0,0,0,0.5), 0 0 40px rgba(201,162,75,0.05);
 }
 .login-card::before {
     content: '';
@@ -600,7 +690,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    letter-spacing: 10px;
+    letter-spacing: 7px;
     animation: fadeInUp 1s ease-out;
 }
 .login-subtitle {
@@ -621,7 +711,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     border-bottom: 1px solid var(--line);
     animation: fadeInUp 0.6s ease-out;
     position: relative;
-    background: linear-gradient(180deg, rgba(212,175,55,0.02) 0%, transparent 100%);
+    background: linear-gradient(180deg, rgba(201,162,75,0.02) 0%, transparent 100%);
 }
 .main-header::after {
     content: '';
@@ -638,7 +728,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     letter-spacing: 10px;
     text-transform: uppercase;
     animation: fadeInUp 0.8s ease-out;
-    text-shadow: 0 0 20px rgba(212,175,55,0.3);
+    text-shadow: 0 0 20px rgba(201,162,75,0.3);
 }
 .main-header-title {
     font-size: 42px;
@@ -662,8 +752,8 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 /* Expander + 애니메이션 */
 .stExpander {
     background: var(--card) !important;
-    border: 1px solid var(--line) !important;
-    border-radius: 0 !important;
+    border: 0.5px solid var(--line2) !important;
+    border-radius: 12px !important;
     animation: fadeInUp 0.4s ease-out;
     transition: border-color 0.3s ease;
 }
@@ -675,7 +765,7 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     background-size: 300% 100%;
     animation: goldShine 3s ease infinite;
     border-radius: 4px;
-    box-shadow: 0 0 15px rgba(212,175,55,0.4);
+    box-shadow: 0 0 15px rgba(201,162,75,0.4);
 }
 .stProgress > div > div {
     background: rgba(20,20,20,0.8);
@@ -693,10 +783,10 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
 }
 
 /* 알림 */
-.stSuccess > div { background: rgba(74,124,89,0.1) !important; border: 1px solid rgba(74,124,89,0.3) !important; border-radius: 0; }
-.stWarning > div { background: rgba(196,154,61,0.1) !important; border: 1px solid rgba(196,154,61,0.3) !important; border-radius: 0; }
-.stError > div { background: rgba(139,64,73,0.1) !important; border: 1px solid rgba(139,64,73,0.3) !important; border-radius: 0; }
-.stInfo > div { background: rgba(201,169,98,0.1) !important; border: 1px solid var(--line) !important; border-radius: 0; }
+.stSuccess > div { background: rgba(111,168,111,0.1) !important; border: 0.5px solid rgba(111,168,111,0.3) !important; border-radius: 10px; }
+.stWarning > div { background: rgba(224,192,116,0.1) !important; border: 0.5px solid rgba(224,192,116,0.3) !important; border-radius: 10px; }
+.stError > div { background: rgba(201,122,111,0.1) !important; border: 0.5px solid rgba(201,122,111,0.3) !important; border-radius: 10px; }
+.stInfo > div { background: rgba(201,162,75,0.08) !important; border: 0.5px solid var(--line) !important; border-radius: 10px; }
 
 /* 스크롤바 */
 ::-webkit-scrollbar { width: 6px; }
@@ -709,16 +799,16 @@ li { font-size: 16px !important; line-height: 1.8 !important; }
     background-size: 200% 100%;
     color: var(--dark) !important;
     border: none !important;
-    border-radius: 2px;
+    border-radius: 12px;
     font-weight: 600;
-    letter-spacing: 3px;
-    box-shadow: 0 4px 20px rgba(212,175,55,0.3);
+    letter-spacing: 1.5px;
+    box-shadow: 0 4px 20px rgba(201,162,75,0.3);
     transition: all 0.4s ease;
     text-shadow: 0 1px 1px rgba(255,255,255,0.2);
 }
 .stDownloadButton button:hover {
     background-position: 100% 0 !important;
-    box-shadow: 0 8px 35px rgba(212,175,55,0.5);
+    box-shadow: 0 8px 35px rgba(201,162,75,0.5);
     transform: translateY(-2px);
 }
 
@@ -889,29 +979,43 @@ select option {
 """, unsafe_allow_html=True)
 
 
-# 인증
-CORRECT_PASSWORD = "cashmaker2024"
+
+# ==========================================
+# 비밀번호 인증 (단순)
+# ==========================================
 if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = is_authenticated()
+    st.session_state['authenticated'] = False
+
+# 저장된 비밀번호로 자동 로그인 (매 실행마다 재확인)
+# 쿠키는 첫 실행 뒤 재실행 시점에 늦게 로드될 수 있으므로, 미인증 상태에서는
+# 매번 saved_password를 다시 확인해야 쿠키가 늦게 들어와도 자동 로그인이 된다.
+if not st.session_state['authenticated']:
+    if st.session_state.get('saved_password', '') == CORRECT_PASSWORD:
+        st.session_state['authenticated'] = True
 
 if not st.session_state['authenticated']:
     st.markdown("""
     <div class="login-card">
-        <div class="login-title">Writey</div>
+        <div class="login-subtitle">CASHMAKER</div>
+        <div class="login-title">WRITEY</div>
         <div class="login-subtitle">Premium E-Book Studio</div>
     </div>
     """, unsafe_allow_html=True)
+
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         pw = st.text_input("비밀번호", type="password", key="pw_login", placeholder="Enter password...")
-        if st.button("입장", key="btn_login"):
+        remember_pw = st.checkbox("비밀번호 저장 (다음 접속 시 자동 로그인)", value=True, key="remember_pw")
+        if st.button("입장", key="btn_login", use_container_width=True):
             if pw == CORRECT_PASSWORD:
                 st.session_state['authenticated'] = True
-                save_authenticated()
+                if remember_pw:
+                    save_password_to_browser(pw)
                 st.rerun()
             else:
                 st.error("비밀번호가 올바르지 않습니다")
     st.stop()
+
 
 # 세션 초기화
 defaults = {
@@ -932,30 +1036,60 @@ for k, v in defaults.items():
 
 # 사이드바
 with st.sidebar:
-    st.markdown("### 🔑 Claude API 키")
+    # API 키 섹션 (접기/펼치기 가능)
+    if 'show_api_section' not in st.session_state:
+        st.session_state['show_api_section'] = True
 
     if 'api_key' not in st.session_state:
-        st.session_state['api_key'] = load_saved_api_key()
+        # 쿠키에서 API 키 불러오기
+        st.session_state['api_key'] = st.session_state.get('saved_api_key', '') or ''
+    # api_key가 비어 있는데 쿠키에 저장된 키가 (늦게) 들어왔다면 복원
+    elif not st.session_state['api_key'] and st.session_state.get('saved_api_key'):
+        st.session_state['api_key'] = st.session_state['saved_api_key']
 
-    api_key = st.text_input("키 입력", value=st.session_state['api_key'], type="password", key="api_sidebar", label_visibility="collapsed", placeholder="sk-ant-api03-... 형식")
-    if api_key != st.session_state['api_key']:
-        st.session_state['api_key'] = api_key
-        save_api_key(api_key)
+    # API 키가 입력되어 있으면 기본적으로 접힌 상태로
+    api_key_exists = bool(st.session_state['api_key'])
 
-    if api_key:
-        st.success("✅ Claude 키 입력 완료!")
+    col_title, col_toggle = st.columns([4, 1])
+    with col_title:
+        st.markdown("### 🔑 Claude API 키")
+    with col_toggle:
+        toggle_label = "▼" if st.session_state['show_api_section'] else "▶"
+        if st.button(toggle_label, key="toggle_api_section", help="접기/펼치기"):
+            st.session_state['show_api_section'] = not st.session_state['show_api_section']
+            st.rerun()
+
+    if st.session_state['show_api_section']:
+        api_key = st.text_input("키 입력", value=st.session_state['api_key'], type="password", key="api_sidebar", label_visibility="collapsed", placeholder="sk-ant-api03-... 형식")
+        if api_key != st.session_state['api_key']:
+            st.session_state['api_key'] = api_key
+            # 쿠키에 저장
+            if api_key:
+                save_api_key_to_browser(api_key)
+                # 비밀번호 흐름과 동일하게 즉시 재실행해 pending 값을 쿠키에 바로 기록
+                # (재실행이 없으면 다음 상호작용 전까지 쿠키 기록이 미뤄져 저장이 누락될 수 있음)
+                st.rerun()
+
+        if api_key:
+            st.success("✅ Claude 키 입력 완료!")
+        else:
+            st.error("⚠️ Claude API 키를 입력하세요")
     else:
-        st.error("⚠️ Claude API 키를 입력하세요")
+        # 접힌 상태에서 간단한 상태 표시
+        if st.session_state['api_key']:
+            st.caption("✅ API 키 설정됨")
+        else:
+            st.caption("⚠️ API 키 필요")
 
     # 모델 선택
     st.markdown("### 🤖 모델 선택")
     if 'claude_model' not in st.session_state:
-        st.session_state['claude_model'] = "claude-sonnet-4-20250514"
+        st.session_state['claude_model'] = "claude-sonnet-4-5"
 
     model_options = {
-        "Claude Sonnet 4 (추천)": "claude-sonnet-4-20250514",
-        "Claude Sonnet 3.5 v2": "claude-3-5-sonnet-20241022",
-        "Claude Haiku 3.5 (저렴)": "claude-3-5-haiku-20241022"
+        "Claude Sonnet 4.5 (추천)": "claude-sonnet-4-5",
+        "Claude Opus 4.5 (최고 품질)": "claude-opus-4-5",
+        "Claude Haiku 4.5 (저렴)": "claude-haiku-4-5"
     }
     selected_model = st.selectbox(
         "모델 선택",
@@ -966,11 +1100,11 @@ with st.sidebar:
     st.session_state['claude_model'] = model_options[selected_model]
 
     if "Haiku" in selected_model:
-        st.info("💰 저렴하지만 품질이 낮을 수 있음")
-    elif "Sonnet 4" in selected_model:
-        st.info("💎 최신 모델, 최고 품질")
+        st.info("💰 가장 저렴하고 빠름.\n📌 단, 목차·본문·프롤로그·에필로그·컨셉·제목 생성은 품질 보장을 위해 자동으로 Sonnet 4.5 사용")
+    elif "Opus" in selected_model:
+        st.info("💎 최고 품질, 단가가 가장 높음")
     else:
-        st.info("⚡ 안정적인 성능")
+        st.info("⚡ 균형잡힌 품질/가격, 일반적으로 가장 추천")
 
     # API 키 발급 방법 안내
     with st.expander("📖 Claude API 키 발급 방법 (상세)", expanded=False):
@@ -1026,6 +1160,15 @@ with st.sidebar:
             st.session_state['current_page'] = sidebar_mapping[i]
             st.rerun()
 
+    # 사이드바 하단 제작자 정보
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align:center; padding:10px 0; color:#C9A24B !important; font-size:12px;">
+        <strong>CASHMAKER</strong><br>
+        <span style="color:#ffffff !important;">제작: 남현우 작가</span>
+    </div>
+    """, unsafe_allow_html=True)
+
 # ==========================================
 # 헬퍼 함수
 # ==========================================
@@ -1040,9 +1183,12 @@ def clean_text(text):
     text = text.replace('**', '').replace('*', '').replace('###', '').replace('##', '').replace('#', '')
     return text.strip()
 
-def clean_content(text):
+def clean_content(text, subtopic=None):
     if not text:
         return ""
+    # HTML 테이블 및 모든 HTML 태그 제거
+    text = re.sub(r'<table[^>]*>.*?</table>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
     # 마크다운 제거
     text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
     # **굵은글씨** 패턴 완전 제거
@@ -1051,7 +1197,18 @@ def clean_content(text):
     text = text.replace('**', '').replace('*', '').replace('###', '').replace('##', '').replace('#', '')
     # 연속 줄바꿈 정리
     text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+    text = text.strip()
+
+    # 본문 첫 줄이 소제목과 동일하면 제거 (AI가 소제목을 본문 시작에 또 박는 경우)
+    if subtopic:
+        sub_clean = re.sub(r'[「」"\'\s\.\?!]+', '', subtopic).strip()
+        lines = text.split('\n')
+        if lines:
+            first_line_clean = re.sub(r'[「」"\'\s\.\?!]+', '', lines[0]).strip()
+            # 정확 일치 또는 거의 같은 경우 (90% 이상 매칭)
+            if first_line_clean == sub_clean or (sub_clean and sub_clean in first_line_clean and len(first_line_clean) <= len(sub_clean) * 1.2):
+                text = '\n'.join(lines[1:]).lstrip('\n').strip()
+    return text
 
 def parse_json(response):
     """JSON 파싱 - 개선된 에러 처리"""
@@ -1077,8 +1234,12 @@ def parse_json(response):
         st.warning(f"파싱 오류: {str(e)[:50]}")
     return None
 
-def ask_ai(prompt, temp=0.7):
-    """Claude API 호출"""
+def ask_ai(prompt, temp=0.7, ensure_quality=False):
+    """Claude API 호출
+
+    ensure_quality=True 시 Haiku 선택해도 자동으로 Sonnet 4.5로 업그레이드.
+    목차/본문/프롤로그/에필로그/컨셉 생성처럼 정교한 프롬프트를 따라야 하는 작업에 사용.
+    """
     api_key = get_api_key()
     if not api_key:
         st.error("Claude API 키를 입력해주세요")
@@ -1088,8 +1249,14 @@ def ask_ai(prompt, temp=0.7):
         st.error("anthropic 패키지가 설치되지 않았습니다. pip install anthropic")
         return None
 
-    # 선택된 모델 가져오기 (기본값: Sonnet 4)
-    model = st.session_state.get('claude_model', 'claude-sonnet-4-20250514')
+    # 선택된 모델 가져오기 (기본값: Sonnet 4.5)
+    user_model = st.session_state.get('claude_model', 'claude-sonnet-4-5')
+
+    # 핵심 생성 작업은 Haiku 자동 업그레이드 (품질 일관성 보장)
+    if ensure_quality and 'haiku' in user_model.lower():
+        model = 'claude-sonnet-4-5'
+    else:
+        model = user_model
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -1109,10 +1276,18 @@ def ask_ai(prompt, temp=0.7):
         st.error("API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.")
         return None
     except anthropic.BadRequestError as e:
-        st.error(f"요청 오류: {str(e)[:100]}")
+        try:
+            err_msg = str(e).encode('utf-8', errors='ignore').decode('utf-8')[:100]
+        except:
+            err_msg = "요청 형식 오류"
+        st.error(f"요청 오류: {err_msg}")
         return None
     except Exception as e:
-        st.error(f"AI 오류: {str(e)[:100]}")
+        try:
+            err_msg = str(e).encode('utf-8', errors='ignore').decode('utf-8')[:100]
+        except:
+            err_msg = "알 수 없는 오류"
+        st.error(f"AI 오류: {err_msg}")
         return None
 
 def generate_cover_image_gemini(title, subtitle, theme_keywords):
@@ -1210,6 +1385,130 @@ STYLE: (디자인 스타일, 예: editorial, bold, elegant)
 
         return image_prompt, color_scheme, style
     return None, "dark", "editorial"
+
+
+# ==========================================
+# 고급 표지 렌더러 (외부 API 불필요, 벡터 SVG)
+# ==========================================
+COVER_TEMPLATES = {
+    "noir_gold": "느와르 골드 — 블랙 + 금박",
+    "editorial": "에디토리얼 — 아이보리 + 세리프",
+    "deep_navy": "딥 네이비 — 남색 + 아이보리",
+}
+
+
+def _wrap_title_lines(title, max_chars=7, max_lines=3):
+    """제목을 표지용으로 줄바꿈 (한글 글자수 기준)"""
+    title = (title or "").strip()
+    if not title:
+        return ["제목"]
+    words = title.split()
+    lines, cur = [], ""
+    for w in words:
+        cand = (cur + " " + w).strip()
+        if not cur or len(cand) <= max_chars:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    # 띄어쓰기 없는 긴 단어는 강제 줄바꿈
+    if len(lines) == 1 and len(lines[0]) > max_chars:
+        s = lines[0]
+        lines = [s[i:i + max_chars] for i in range(0, len(s), max_chars)]
+    return lines[:max_lines]
+
+
+def build_cover_svg(template, title, subtitle, author):
+    """베스트셀러급 고급 표지 SVG 생성 (1600x2560, 무손실 벡터)"""
+    t_lines = _wrap_title_lines(title, max_chars=7, max_lines=3)
+    longest = max((len(l) for l in t_lines), default=4)
+    if longest <= 4:
+        fs = 230
+    elif longest <= 6:
+        fs = 185
+    else:
+        fs = 150
+
+    sub = html.escape((subtitle or "").strip())
+    auth = html.escape((author or "").strip())
+    esc_lines = [html.escape(l) for l in t_lines]
+
+    line_h = int(fs * 1.22)
+    n = len(esc_lines)
+    title_top = 1180 - int((n - 1) * line_h / 2)
+    tspans = "".join(
+        f'<tspan x="800" dy="{0 if i == 0 else line_h}">{ln}</tspan>'
+        for i, ln in enumerate(esc_lines)
+    )
+
+    fonts = (
+        '<style><![CDATA['
+        "@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;500;600;700;900&display=swap');"
+        ']]></style>'
+    )
+    serif = "'Noto Serif KR','Nanum Myeongjo',serif"
+
+    if template == "editorial":
+        ink, accent, subcol = '#1A1A1A', '#8A7A55', '#5A5346'
+        bg = (
+            '<rect width="1600" height="2560" fill="#F4F0E8"/>'
+            f'<rect x="78" y="78" width="1444" height="2404" fill="none" stroke="{ink}" stroke-width="2"/>'
+        )
+        deco = (
+            f'<line x1="610" y1="{title_top - 130}" x2="990" y2="{title_top - 130}" stroke="{accent}" stroke-width="3"/>'
+            f'<line x1="660" y1="1560" x2="940" y2="1560" stroke="{accent}" stroke-width="2"/>'
+        )
+        tw = 600
+    elif template == "deep_navy":
+        ink, accent, subcol = '#F3ECD9', '#C9A24B', '#C9C3B2'
+        bg = (
+            '<defs><radialGradient id="bgnavy" cx="50%" cy="38%" r="72%">'
+            '<stop offset="0%" stop-color="#1B3457"/><stop offset="100%" stop-color="#0B1626"/>'
+            '</radialGradient></defs>'
+            '<rect width="1600" height="2560" fill="url(#bgnavy)"/>'
+            f'<rect x="70" y="70" width="1460" height="2420" fill="none" stroke="{accent}" stroke-width="2" opacity="0.7"/>'
+        )
+        deco = (
+            f'<line x1="660" y1="{title_top - 120}" x2="940" y2="{title_top - 120}" stroke="{accent}" stroke-width="3"/>'
+            f'<rect x="780" y="1540" width="40" height="40" transform="rotate(45 800 1560)" fill="none" stroke="{accent}" stroke-width="2"/>'
+        )
+        tw = 600
+    else:  # noir_gold
+        ink, accent, subcol = '#E9D9A8', '#C9A24B', '#B8B3A8'
+        bg = (
+            '<defs><radialGradient id="bgnoir" cx="50%" cy="40%" r="75%">'
+            '<stop offset="0%" stop-color="#1C1A14"/><stop offset="60%" stop-color="#0E0D0B"/>'
+            '<stop offset="100%" stop-color="#060606"/></radialGradient></defs>'
+            '<rect width="1600" height="2560" fill="url(#bgnoir)"/>'
+            f'<rect x="64" y="64" width="1472" height="2432" fill="none" stroke="{accent}" stroke-width="1.5" opacity="0.55"/>'
+            f'<rect x="84" y="84" width="1432" height="2392" fill="none" stroke="{accent}" stroke-width="0.75" opacity="0.35"/>'
+        )
+        deco = (
+            f'<line x1="640" y1="{title_top - 120}" x2="960" y2="{title_top - 120}" stroke="{accent}" stroke-width="2"/>'
+            f'<line x1="700" y1="1560" x2="900" y2="1560" stroke="{accent}" stroke-width="1.5" opacity="0.8"/>'
+        )
+        tw = 700
+
+    sub_svg = (
+        f'<text x="800" y="1640" text-anchor="middle" font-family="{serif}" '
+        f'font-size="46" fill="{subcol}" letter-spacing="6">{sub}</text>'
+    ) if sub else ""
+    auth_svg = (
+        f'<text x="800" y="2360" text-anchor="middle" font-family="{serif}" '
+        f'font-size="40" fill="{accent}" letter-spacing="10">{auth}</text>'
+    ) if auth else ""
+
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 2560" '
+        'width="100%" preserveAspectRatio="xMidYMid meet">'
+        f'{fonts}{bg}{deco}'
+        f'<text x="800" y="{title_top}" text-anchor="middle" font-family="{serif}" '
+        f'font-size="{fs}" font-weight="{tw}" fill="{ink}" letter-spacing="3">{tspans}</text>'
+        f'{sub_svg}{auth_svg}</svg>'
+    )
+
 
 def extract_video_id(url):
     """YouTube URL에서 video ID 추출"""
@@ -1496,7 +1795,7 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
         # 프롤로그 내용 - AI가 인터뷰 내용을 참고해서 자연스럽게 작성
         prologue_text = None
         if interview_data:
-            prologue_prompt = f"""당신은 자청 스타일로 글을 쓰는 베스트셀러 작가입니다. 프롤로그를 작성하세요.
+            prologue_prompt = f"""당신은 한국 자기계발 베스트셀러 작가입니다. 독자가 첫 문장에서 "이거 내 얘기야"라고 무릎 치고, 마지막 문장에서 "다음 페이지가 너무 궁금해"라며 책장을 넘기게 만드는 프롤로그를 작성하세요.
 
 [저자 정보 - 참고용, 그대로 복사하지 말 것]
 - 분야: {interview_data.get('field', '')}
@@ -1506,27 +1805,67 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
 - 독자의 고민: {interview_data.get('target_problem', '')}
 - 집필 동기: {interview_data.get('why_write', '')}
 
-[프롤로그 작성 원칙]
-1. 나의 실패담이나 솔직한 고백으로 시작
-2. "저도 처음엔 몰랐습니다" 공감
-3. 이 책에서 뭘 얻어갈 수 있는지 힌트
-4. 짧은 문장 (한 문장에 생각 하나)
-5. 짧은 문단 (2-4문장 MAX)
-6. 구어체 + 합쇼체 ("~거든요", "~잖아요" OK)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 프롤로그의 단 하나의 미션
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[분량] 400-600자
+독자가 첫 문장부터 마지막 문장까지 한숨에 읽고, 자기 이야기처럼 공감하면서, 본문이 미치도록 궁금해서 1장으로 넘어갈 수밖에 없게 만들 것.
 
-[금지 - 절대 쓰지 말 것]
-- 위 저자 정보를 그대로 복사 붙여넣기
-- 교과서 표현: "여정", "발걸음", "함께 하시길 바랍니다", "진정한"
-- AI 표현: "~의 중요성", "다양한", "효과적인", "~를 통해"
-- 과장: "놀라운", "혁신적인", "충격적인"
-- 뻔한 말: "포기하지 마세요", "꾸준히 하세요"
-- 마크다운 문법
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✍️ 톤: 공감 후킹 + 스토리텔링 + 호기심 갭
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-프롤로그만 출력하세요."""
+[5막 구조 - 베스트셀러 프롤로그 공식]
 
-            generated_prologue = ask_ai(prologue_prompt, 0.7)
+1막) 누구나 겪는 장면 (3~4문장) - 공감 끌어올리기
+   - 독자가 "이거 내 얘기야"라고 즉시 떠올리는 구체적 장면
+   - 시간·장소·감정의 디테일 (예: "수요일 밤 11시. 또 인스타를 켰다. 친구 OO이 부자가 돼 있었다.")
+   - 일반론 절대 금지. 손에 잡히는 장면 하나
+
+2막) 저자의 고백 (3~4문장) - "저도 그랬습니다"
+   - 구체적 실패담 + 그때의 감정 (수치심, 막막함, 분노 등)
+   - 진심 어린 톤 (위에서 내려다보지 말 것)
+   - 약점 노출이 신뢰를 만든다
+
+3막) 결정적 전환 (2~3문장) - 그러던 어느 날
+   - 발견 / 사건 / 만남의 순간
+   - "그날 알게 된 한 가지가 모든 걸 바꿨다"
+   - 그게 뭔지 다 말하지 말고 살짝 가리기
+
+4막) 약속 + 변화 (2문장) - 이 책이 줄 것
+   - 본문이 다룰 핵심 변화를 구체적으로 (숫자/기간 포함)
+   - 추상 X, 구체 O (예: "이 책은 그 90초가 어떻게 작동하는지 단계별로 풀어냅니다.")
+
+5막) 본문 미끼 (1~2문장) - 페이지 넘기게 하기
+   - 본문 1장이 다룰 가장 강한 장면 또는 통찰의 일부만 흘리기
+   - "그런데 그 출발점은 의외의 한 가지였습니다." 같은 호기심 갭
+   - "다음 페이지부터 시작됩니다" 같은 직접 안내는 절대 X
+
+[문체]
+- 합쇼체 기본 + 구어체 자연스럽게 ("~거든요", "~더라고요", "~잖아요")
+- 짧은 문장 위주, 가끔 긴 문장으로 호흡 변화
+- 현재형/과거형 혼용으로 생생한 장면감
+- 디테일이 살아 있는 묘사 (시간, 숫자, 표정, 사물, 장소)
+
+[분량] 600~800자
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚫 절대 금지
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ 마크다운 문법 일체 (# ## ### **굵게** > 인용 - 글머리) — 제목/라벨 출력 금지, 본문 텍스트만
+❌ "프롤로그", "Prologue", "Prologue.", "들어가며" 같은 제목/라벨 출력 금지 (이미 본문 위에 'Prologue' 표시됨)
+❌ 위 저자 정보를 그대로 복사 붙여넣기
+❌ 자청, 역행자, 자의식 해체, 유전자 역행, 원시인, 추월차선 (특정 작가 고유 표현)
+❌ 교과서 표현: "여정", "발걸음", "함께 하시길 바랍니다", "진정한", "이 책의 여정"
+❌ AI 어휘: "~의 중요성", "다양한", "효과적인", "~를 통해", "이 책을 통해"
+❌ 과장: "놀라운", "혁신적인", "충격적인", "어마어마한", "기적의"
+❌ 뻔한 말: "포기하지 마세요", "꾸준히 하세요", "당신도 할 수 있습니다", "함께 가요"
+❌ 직접 호칭: 여러분, 당신, 독자님
+❌ 위에서 내려다보는 어조 (당신은 이래서 안 됩니다 X)
+
+본문 텍스트만 출력하세요. 어떤 마크다운 헤더(#)나 '프롤로그' 라벨도 출력하지 마세요. 첫 문장부터 바로 본문이 시작되어야 합니다."""
+
+            generated_prologue = ask_ai(prologue_prompt, 0.7, ensure_quality=True)
             if generated_prologue:
                 prologue_text = generated_prologue
 
@@ -1543,19 +1882,26 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
 
 자, 이제 시작합니다."""
 
-        # **프롤로그** 같은 마크다운 제목 제거
-        prologue_text = prologue_text.replace('**프롤로그**', '').replace('**Prologue**', '').strip()
+        # 마크다운 헤더(#, ##, ###) + 굵게(**) + '프롤로그/Prologue' 라벨 모두 제거
+        # AI가 어떤 형태로 라벨을 박든 다 잡아냄
+        prologue_text = re.sub(r'^\s*#+\s*(프롤로그|Prologue|들어가며|머리말)\s*\.?\s*$', '', prologue_text, flags=re.MULTILINE | re.IGNORECASE)
+        prologue_text = re.sub(r'^\s*\*+\s*(프롤로그|Prologue|들어가며|머리말)\s*\*+\s*$', '', prologue_text, flags=re.MULTILINE | re.IGNORECASE)
+        prologue_text = re.sub(r'^\s*(프롤로그|Prologue|들어가며|머리말)\s*\.?\s*\n', '', prologue_text, flags=re.IGNORECASE)
+        prologue_text = prologue_text.replace('**프롤로그**', '').replace('**Prologue**', '')
+        # 시작 부분의 빈 줄 제거
+        prologue_text = prologue_text.lstrip('\n').strip()
 
+        # 프롤로그 본문 - 본문과 완전히 동일한 양식 (양쪽 맞춤, 10.5pt, line_spacing 1.85, 들여쓰기)
         for para_text in prologue_text.split('\n\n'):
             if para_text.strip():
                 para = doc.add_paragraph()
-                para.alignment = WD_ALIGN_PARAGRAPH.LEFT  # 왼쪽 정렬 (본문과 동일)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # 양쪽 맞춤 (본문과 동일)
                 para_run = para.add_run(para_text.strip())
-                set_font(para_run, 10)
+                set_font(para_run, 10.5, color=(45, 45, 45))  # 본문과 동일한 폰트/색
                 para_format = para.paragraph_format
-                para_format.line_spacing = 1.6
-                # 문단 사이 간격 (한 줄 띄우기 효과)
+                para_format.line_spacing = 1.85  # 본문과 동일한 줄간격
                 para_format.space_after = Pt(14)
+                para_format.first_line_indent = Cm(0.6)  # 본문과 동일한 들여쓰기
 
         doc.add_page_break()
 
@@ -2035,8 +2381,8 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
                         sub_title = add_subtopic_header(doc, sub, sub_idx)
                         add_bookmark(sub_title, f"subtopic_{idx + 1}_{sub_idx + 1}")
 
-                        # 본문 내용 (표 감지 및 처리 포함)
-                        cleaned = clean_content(content)
+                        # 본문 내용 (표 감지 및 처리 포함, 소제목 중복도 제거)
+                        cleaned = clean_content(content, subtopic=sub)
 
                         # 표가 포함된 콘텐츠 처리
                         content_blocks = process_content_with_tables(doc, cleaned)
@@ -2106,7 +2452,7 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
         # 에필로그 내용 - AI가 인터뷰 내용을 참고해서 자연스럽게 작성
         epilogue_text = None
         if interview_data:
-            epilogue_prompt = f"""당신은 자청 스타일로 글을 쓰는 베스트셀러 작가입니다. 에필로그를 작성하세요.
+            epilogue_prompt = f"""당신은 한국 자기계발 베스트셀러 작가입니다. 마지막 페이지를 덮은 독자가 한 번 더 처음으로 돌아가게 만드는 에필로그를 작성하세요.
 
 [저자 정보 - 참고용, 그대로 복사하지 말 것]
 - 분야: {interview_data.get('field', '')}
@@ -2145,15 +2491,17 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
 
 [금지 - 절대 쓰지 말 것]
 - 저자 정보를 그대로 복사 붙여넣기
+- 자청, 역행자, 자의식 해체, 유전자 역행, 원시인, 추월차선 (특정 작가 고유 표현)
 - 교과서 표현: "여정", "발걸음", "함께 하시길 바랍니다", "진정한"
 - AI 표현: "~의 중요성", "다양한", "효과적인", "~를 통해"
 - 과장: "놀라운", "혁신적인", "충격적인"
 - 뻔한 말: "포기하지 마세요", "꾸준히 하세요", "화이팅"
+- 직접 호칭: 여러분, 당신, 독자님
 - 마크다운 문법
 
 에필로그만 출력하세요."""
 
-            generated_epilogue = ask_ai(epilogue_prompt, 0.7)
+            generated_epilogue = ask_ai(epilogue_prompt, 0.7, ensure_quality=True)
             if generated_epilogue:
                 epilogue_text = generated_epilogue
 
@@ -2168,16 +2516,24 @@ def create_ebook_docx(title, subtitle, author, chapters_data, outline, interview
 
 항상 응원합니다."""
 
+        # 마크다운 헤더(#, ##) + 굵게(**) + '에필로그/Epilogue' 라벨 모두 제거
+        epilogue_text = re.sub(r'^\s*#+\s*(에필로그|Epilogue|마치며|맺음말)\s*\.?\s*$', '', epilogue_text, flags=re.MULTILINE | re.IGNORECASE)
+        epilogue_text = re.sub(r'^\s*\*+\s*(에필로그|Epilogue|마치며|맺음말)\s*\*+\s*$', '', epilogue_text, flags=re.MULTILINE | re.IGNORECASE)
+        epilogue_text = re.sub(r'^\s*(에필로그|Epilogue|마치며|맺음말)\s*\.?\s*\n', '', epilogue_text, flags=re.IGNORECASE)
+        epilogue_text = epilogue_text.replace('**에필로그**', '').replace('**Epilogue**', '')
+        epilogue_text = epilogue_text.lstrip('\n').strip()
+
+        # 에필로그 본문 - 본문과 완전히 동일한 양식
         for para_text in epilogue_text.split('\n\n'):
             if para_text.strip():
                 para = doc.add_paragraph()
                 para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 para_run = para.add_run(para_text.strip())
-                set_font(para_run, 10, color=(50, 50, 50))
+                set_font(para_run, 10.5, color=(45, 45, 45))
                 para_format = para.paragraph_format
-                para_format.line_spacing = 1.7
+                para_format.line_spacing = 1.85
                 para_format.space_after = Pt(14)
-                para_format.first_line_indent = Cm(0.5)
+                para_format.first_line_indent = Cm(0.6)
 
         # 저자 서명 (프리미엄 스타일)
         for _ in range(3):
@@ -2307,9 +2663,9 @@ def generate_outline_only(interview_data, progress_placeholder):
 • 3R 시스템 (Research-Run-Repeat)
 
 [한글 조어]
-• 역행 루프
-• 수익 사이클
-• 복리 엔진
+• 단단한 매출 구조
+• 복리 통장 공식
+• 잠자는 매출 회로
 
 [분야별 비유 - 다양하게!]
 • 주식: 스노우볼, 배당 파이프라인, 현금흐름 엔진
@@ -2324,7 +2680,7 @@ def generate_outline_only(interview_data, progress_placeholder):
 
 1. 고유 시스템/공식 이름 (가장 중요!)
    - 영어 약자 + 한글 설명 (예: "CPM 전략")
-   - 또는 직관적인 한글 조어 (예: "역행 루프")
+   - 또는 직관적인 한글 조어 (예: "단단한 매출 구조")
    - 목차 전체에서 이 용어가 반복되어야 함
 
 2. 핵심 관점
@@ -2368,7 +2724,7 @@ def generate_outline_only(interview_data, progress_placeholder):
 [목차에서 반복할 키워드]
 (시스템 이름 또는 핵심 단어 1~2개)"""
 
-        book_concept = ask_ai(concept_prompt, 0.8)
+        book_concept = ask_ai(concept_prompt, 0.8, ensure_quality=True)
         st.session_state['book_concept'] = book_concept
 
         # 3. 제목 생성
@@ -2386,10 +2742,10 @@ def generate_outline_only(interview_data, progress_placeholder):
 🔥 실제 잘 팔리는 전자책 제목 분석
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[자청/프드프 스타일 - 컨셉 중심]
-• 역행자 - 부자의 시간을 사는 법
+[컨셉 중심형 - 짧은 신조어 + 부제]
+• 단단한 돈 - 잃지 않는 사람의 7가지 원칙
 • 돈의 속성 - 최소한 이것만은 알아야 할
-• 부의 추월차선 - 부자들이 말해주지 않는 것
+• 1억 모으는 통장 - 30대 직장인의 5단계 공식
 
 [신사임당/클래스101 스타일 - 결과 중심]
 • 퇴사 후 월 1000만원 버는 글쓰기
@@ -2407,7 +2763,7 @@ def generate_outline_only(interview_data, progress_placeholder):
 
 [공식 1] 컨셉형 (2~4단어)
 저자만의 프레임워크/용어가 들어간 제목
-예: "역행자", "추월차선", "언카피어블"
+예: 짧고 강렬한 신조어/약어 (3~5자), 동사의 명사화, 은유적 압축어
 
 [공식 2] 결과형 (구체적 숫자 포함)
 기간 + 결과가 명확한 제목
@@ -2453,114 +2809,276 @@ JSON만 출력:
 
         # 4. 목차 생성 (책 컨셉 기반)
         progress_placeholder.info("📋 4/4 목차 설계 중...")
-        outline_prompt = f"""당신은 크몽/클래스101 베스트셀러 전자책 기획자입니다.
-목차만 보고 결제 버튼을 누르게 만드세요.
+        outline_prompt = f"""당신은 한국 자기계발 분야 톱 0.1% 기획자입니다. 서점에서 단 5초간 목차만 본 사람이 책을 손에서 못 놓게 만드는 5장짜리 목차를 씁니다.
 
-[이 책의 고유 시스템/공식]
+목차의 단 하나의 목적: 독자가 "이 책을 안 읽으면 평생 손해"라고 느끼게 만드는 것.
+정보 전달은 본문이 한다. 목차는 100% 구매심리만 다룬다.
+
+[이 책의 시그니처 컨셉/시스템]
 {book_concept}
 
 [주제]: {topic}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 목차 구성 원칙
+🛒 구매 결정 5초 룰 (모든 규칙 중 1순위)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. 위 컨셉의 "시스템/공식 이름"을 목차 전체에서 활용
-2. 챕터마다 그 시스템의 다른 측면을 다룸
-3. 독자가 "이 시스템을 배우면 나도 할 수 있겠다" 느끼게
+독자는 목차를 5초만 본다. 그 5초 안에 다음 3가지가 동시에 작동해야 결제한다.
 
-예시) "CPM 전략" 컨셉이라면:
-- PART 1. C(Contents): 콘텐츠 없이 시작하면 망하는 이유
-- PART 2. P(Profit): 수익이 자동으로 굴러가는 구조
-- PART 3. M(Multiply): 하나로 열 개를 만드는 복제 기술
+[1] 정체성 변화 발견 — "이걸 읽으면 나는 OO한 사람이 된다"
+   → 5개 챕터 제목을 이어 읽으면 한 사람의 결정적 변화가 보여야 한다.
+   ✅ "단단해진 멘탈은 인생을 통째로 바꾼다" (변화 서사 O)
+   ❌ "멘탈 관리의 다양한 기법" (정체성 변화 X — 즉시 폐기)
 
-예시) "상위노출 알고리즘" 컨셉이라면:
-- PART 1. 알고리즘의 비밀: 네이버가 순위를 정하는 진짜 기준
-- PART 2. 블랙 키워드: 경쟁 없이 1등 하는 틈새 공략법
-- PART 3. 자동 상승 공식: 한 번 올리면 계속 오르는 구조
+[2] 손실회피 작동 — "이걸 모르면 평생 OO한다"
+   → 통념 박살(인지부조화) 챕터/소제목이 최소 3개 들어가야 한다.
+   ✅ "의지로 버틴 사람일수록 더 크게 무너진다"
+   ❌ "멘탈 관리의 중요성" (잃을 게 안 보임)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📌 챕터 제목 공식
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[3] 구체성 — 추상 명사 1개당 구체적 숫자/장면 1개
+   → "많은 사람" 금지, "월급 280만원짜리 7년차 회사원" 가능
+   → 시간(90초, 47일), 금액(34만원, 1억), 비율(99%, 8할) 적극 사용
 
-"PART X. [시스템 키워드]: [구체적인 내용/결과]"
-
-✅ 좋은 예:
-- "PART 1. 잘못된 공식: 왜 열심히 해도 결과가 안 나오는가"
-- "PART 2. 숨겨진 알고리즘: 상위 1%만 아는 검색 원리"
-- "PART 3. 자동화 루프: 한 번 세팅하면 알아서 굴러가는 구조"
-- "PART 4. 실전 적용: 30일 안에 첫 결과를 만드는 순서"
-- "PART 5. 복리 성장: 월 100에서 월 1000으로 가는 로드맵"
-
-❌ 나쁜 예:
-- "PART 1. 시작" (추상적)
-- "PART 2. 제국을 건설하다" (부자연스러운 과장)
-- "PART 3. 기초 이해" (설명서 같음)
+25줄(챕터 5 + 소제목 20) 중 한 줄이라도 "그냥 정보"가 섞이면 그 목차는 평이해진다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 소제목 공식
+💎 컨셉명 작명 규칙 (위에서 받은 컨셉이 어색하면 다듬어 사용)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-각 소제목은 다른 형식으로 (같은 패턴 반복 금지!)
+[좋은 컨셉명]
+✅ 영문 3~4자 약어 (발음 가능 + 의미 있음): DPS, ARC, PAM, RFM
+✅ 깔끔한 한글 합성어 (3~5자): 단단한 매출 구조, 복리 자산 공식
 
-[반전형] "~는 거짓말이다", "~하면 오히려 망한다"
-[시스템형] "[공식명]의 첫 번째 원칙", "[키워드]가 작동하는 방식"
-[구체적 방법] "3단계로 ~하는 순서", "10분 만에 ~하는 방법"
-[질문형] "왜 ~은 실패하는가", "어떻게 ~할 수 있는가"
-[결과형] "이것만 바꿔도 ~가 달라진다"
+[즉시 폐기 - 어색한 작명]
+❌ 어색한 한글: "월수도", "수익도", "월500", "월천만"
+❌ 영어 외래어 시스템 접미사: 파이프라인, 모듈, 엔진, 회로, 시너지, 매트릭스, 프레임워크
+   → "MDS 파이프라인" "ABC 모듈" 박는 즉시 탈락
+   ✅ 반드시 "○○○ 시스템 / 공식 / 구조 / 법칙" 중 하나로 끝낼 것
+❌ 설명체 컨셉명: "잠자는 동안 매출 굴러가는 시스템"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚫 절대 금지
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ 부자연스러운 과장:
-- "제국을 건설", "왕좌에 오르다", "언더그라운드에서"
-- "전설의", "역사를 바꾼", "나의 고백"
-
-❌ AI스러운 표현:
-- "~의 이해", "~의 기초", "효과적인", "성공적인"
-
-❌ 같은 비유 반복:
-- 모든 챕터에 부동산 비유 쓰지 말 것
-- 다양한 비유 사용 (기계, 알고리즘, 시스템, 공식 등)
-
-❌ 숫자 패턴 반복:
-- "99%", "1%" 같은 표현은 전체에서 1번만
+위 받은 컨셉이 어색하면 룰에 맞게 새로 작명해서 사용해라.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 출력 형식
+🧠 마케팅 뇌과학 8대 트리거 (목차 전체에 골고루 박을 것)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PART 1. [시스템 키워드]: [구체적 서브타이틀]
-- [소제목 15~30자]
-- [소제목 15~30자]
-- [소제목 15~30자]
+1. **손해회피 + 충격 통계** — "1년 안에 99%가 다시 무너진다", "1억치 강의 들어도 망한다"
+2. **인지부조화/통념 박살** — "의지로 버틴 사람일수록 더 크게 무너진다", "노력할수록 가난해진다"
+3. **권위 어휘 (과학/임상)** — 뇌, 신경회로, N주 후, 임상, 데이터, 알고리즘 (절대 비유로 남용 금지, 사실 진술로만)
+4. **임박감 + 절대성** — "이 90초를 놓치면 며칠 걸린다", "다시는 ~하지 않는다"
+5. **정체성 전환 약속** — "회복한 뇌는 다시 무너지지 않는다", "단단해진 사람은 ~한다"
+6. **인그룹 사회증명** — "○○를 익힌 사람들의 5년 뒤", "상위 1%만 도달하는"
+7. **이중/삼중 보상** — "통장과 인간관계가 함께 변한다", "돈도 사람도 따라온다"
+8. **호기심 갭** — "두 달 안에 가장 먼저 끊은 한 가지", "정확히 어디부터 멈추는가"
 
-PART 2. [시스템 키워드]: [구체적 서브타이틀]
-- [소제목]
-- [소제목]
-- [소제목]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧲 호기심 갭(Information Gap) 강화 — 결제를 부르는 가장 강력한 무기
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PART 3. [시스템 키워드]: [구체적 서브타이틀]
-- [소제목]
-- [소제목]
-- [소제목]
+조지 로웬스타인의 정보격차 이론: 사람은 자기가 모르는 것이 '뭔지'는 알지만 '내용'은 모를 때 가장 강하게 끌린다. 25줄 중 최소 10줄에 이 갭을 박아야 목차만 보고 결제한다.
 
-PART 4. [시스템 키워드]: [구체적 서브타이틀]
-- [소제목]
-- [소제목]
-- [소제목]
+[호기심 갭 6대 공식 - 결과만 보이고 방법/이유는 본문으로 미루기]
 
-PART 5. [시스템 키워드]: [구체적 서브타이틀]
-- [소제목]
-- [소제목]
-- [소제목]
+1. **숫자 + 미공개 결과** — '정확히/딱'으로 시작해 결과만 보여주고 내용은 숨기기
+   ✅ "정확히 47일째에 통장이 처음 뒤집힌 그 순간"
+   ✅ "27만원짜리 첫 정산서가 알려준 단 한 가지"
+   ❌ "47일 만에 돈을 버는 방법" (방법을 다 보여줘버림 → 결제 안 함)
 
-목차만 출력."""
+2. **이미 벌어진 사건 + 원인 숨김** — '왜?'를 유발하는 결과만
+   ✅ "3년 차 베테랑이 신입에게 6개월 만에 따라잡힌 단 하나의 이유"
+   ✅ "월 1,000을 찍은 사람들이 가장 먼저 끊은 습관 한 가지"
 
-        outline_result = ask_ai(outline_prompt, 0.4)
+3. **묘하게 구체적인 행동/대상 + 이유 숨김** — 디테일이 호기심을 폭발시킨다
+   ✅ "성공한 부업러가 매일 밤 11시에 반드시 끄는 것"
+   ✅ "1년 만에 1억 모은 사람들이 절대 안 쓰는 5단어"
+   ✅ "월 500 넘긴 사람들 카톡 프로필에서 사라진 한 단어"
 
-        if outline_result:
+4. **반대 결과 미스터리** — 통념과 정반대 결과만 던지고 메커니즘은 본문
+   ✅ "더 열심히 할수록 더 가난해진 7년의 비밀"
+   ✅ "잠을 늘렸더니 매출이 2배가 된 이상한 메커니즘"
+
+5. **'딱 하나' 절대성** — 수많은 변수 중 단 하나만 보여주기
+   ✅ "월 100 / 월 500을 가르는 단 한 줄의 차이"
+   ✅ "결국 모든 게 무너지는 사람들의 공통점 단 하나"
+
+6. **시간 압축 미스터리** — 짧은 시간에 큰 일이 일어났는데 그 사이를 숨기기
+   ✅ "퇴근 후 90분이 1년 뒤 인생을 갈라놓는다"
+   ✅ "주말 4시간이 5년치 월급을 바꾼 그 과정"
+
+[호기심 갭 만들 때 절대 어기지 말 것]
+• 답을 같은 줄에 다 보여주지 마라. "왜 ~한가" "어떻게 ~하는가"로 끝나면 본문을 사야 알 수 있게.
+• "방법" "비법" "노하우" 같은 말로 끝내면 갭이 닫힘 → 결제 안 함.
+• 결과/사건/디테일은 보이고, 원리/메커니즘/순서는 숨겨라.
+• 한 줄 안에 "장면 + 의문"이 같이 있어야 호기심이 작동한다.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 단 하나의 미션
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5개 챕터 제목만 빠르게 이어 읽었을 때 한 사람의 변화 이야기가 보이고, 한 줄 한 줄이 다음 챕터를 못 참게 만들어야 한다.
+
+[컨셉명 등장 규칙 - 3번, 자연스럽게 분산]
+컨셉명은 챕터 제목에는 등장 X. 소제목에만 정확히 3번 자연스럽게 박는다.
+
+⚠️ 컨셉명 글자 수/단어 수를 단정하는 표현 절대 금지 (가장 자주 어기는 실수!)
+   ❌ "○○○ 세 글자에서 시작한다" — 컨셉명이 3글자 아니면 거짓말이 됨
+   ❌ "○○○ 네 글자만 기억하라" — 글자 수 단정 금지
+   ❌ "단 한 단어가 모든 걸 바꾼다" — 단어 수 단정 금지
+   ✅ 컨셉명이 'DPS'(3자)든 '단단한 매출 구조'(8자)든 '복리 자산 공식'(7자)이든 모두 자연스럽게 작동하는 문장만 사용
+
+[PART 1 마지막 소제목 - 도입] (아래 풀에서 1개 선택, 책에 가장 어울리는 것)
+   • "결국 모든 답은 '○○○' 안에 있었다"
+   • "이 책의 모든 페이지는 '○○○' 하나를 향해 간다"
+   • "지금부터 '○○○' 단 하나만 기억하면 된다"
+   • "여기서부터 진짜 이야기, '○○○'가 시작된다"
+   • "마지막에 도달하는 곳은 결국 '○○○'다"
+   • "'○○○'를 만나기 전과 후는 완전히 다른 게임이다"
+   • "이 모든 혼란을 한 줄로 정리하는 '○○○'"
+
+[PART 3 또는 PART 4 안 1곳 - 작동·전환점]
+   • "○○○가 본격 작동하기 시작하는 4가지 신호"
+   • "○○○를 처음 적용한 사람들이 가장 먼저 느낀 변화"
+   • "○○○가 통장에 처음 흔적을 남기는 순간"
+   • "○○○ 한 달 차에 가장 먼저 무너지는 한 가지"
+
+[PART 5 마지막 소제목 - 확장·사회증명]
+   • "○○○를 익힌 사람들의 5년 뒤가 완전히 다른 이유"
+   • "○○○로 자리잡은 사람들이 다시는 돌아가지 않는 이유"
+   • "○○○ 이후, 1년 만에 가장 크게 달라지는 단 한 가지"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📐 챕터 제목 형식 (가장 중요)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[형식]
+- 13~18자의 자연스러운 한국어 한 문장
+- 단어 한두 개짜리 라벨 금지, 라벨 분리(— ㅣ :) 금지
+- 평서문 또는 단언형. "~이유"로 끝나는 설명체는 한 PART에만 사용
+- 명사 엔딩과 동사 엔딩을 챕터별로 섞어라 (5개 모두 명사 엔딩 금지)
+- 5개를 이으면 [좌절 → 통념 박살 → 첫 사건 → 안정화 → 도약]의 5막
+
+[좋은 예 - 성공적인 멘탈 관리 비결]
+PART 1. 1년 안에 99%가 다시 무너지는 결정적 이유
+PART 2. 의지로 잡으려는 순간 뇌는 반대로 움직인다
+PART 3. 회복의 8할이 결판나는 폭발 직후 90초
+PART 4. 한 번 회복한 뇌는 다시는 무너지지 않는다
+PART 5. 단단해진 멘탈은 인생을 통째로 바꾼다
+
+[좋은 예 - 30대 직장인 N잡 월 500]
+PART 1. 직장인 99%가 부업 30일을 못 버티는 이유
+PART 2. 노력보다 자리가 먼저다
+PART 3. 첫 30만원이 통장에 찍힌 그날
+PART 4. 새벽 3시에도 매출이 들어온다
+PART 5. 월 500 다음, 억대 수익으로 가는 길
+
+[나쁜 예 - 즉시 폐기]
+- "발굴", "폭로", "전환" 같은 한두 단어짜리
+- "발굴 — 부업의 90%는 첫 단추에서 망한다" (라벨 + 대시)
+- "DPS의 첫 관문, 노력 없이도 돈이 따라오는 자리를 찾는 법" (시스템명 라벨화 + 너무 김)
+- "이제 무너지는 게 더 이상 사건이 아니다" (사건이 아니다 ← 말이 안 됨)
+- "한 번 흔들려도 다음 날엔 흔적도 없다" (AI식 과장)
+- "월수도 시스템의 첫 설계" (의미 불명 + 설계라는 설명체 어휘)
+- "MDS 파이프라인" (파이프라인이라는 영어 외래어를 시스템 접미사로)
+- "주가 -12% 떨어져도 매도 안 하는 뇌 회로가 박혔다" (뇌 회로가 박히다 = 어법 어색, 비유 남용)
+- "신경회로가 새로 깔리고 있다는 신호" 류 (한 번까진 OK, 같은 비유 두 번 X)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✍️ 소제목 톤: 한국 자기계발 베스트셀러 + 마케팅 뇌과학
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+각 PART당 소제목 4개. 모두 다른 패턴 + 명사·동사 엔딩 섞기 (4개 모두 같은 엔딩 금지).
+
+[좋은 패턴 풀 - 매번 다르게]
+1. 통계 충격형 — "1년 안에 99%가 다시 무너진다", "한 달 차에 90%가 다시 무너지는 정확한 이유"
+2. 인지부조화형 — "의지로 버틴 사람일수록 더 크게 무너진다"
+3. 뇌과학 권위형 — "감정이 폭발할 때 뇌는 정확히 어디부터 멈추는가", "신경회로가 새로 깔리고 있다는 4가지 신호"
+4. 임박감/손해회피형 — "이 90초를 놓치면 다시 일어서는 데 며칠이 걸린다"
+5. 정체성 전환형 — "한 번 회복한 뇌는 다시는 무너지지 않는다"
+6. 호기심 갭형 — "단번에 회복한 사람들이 모두 무의식적으로 하는 행동"
+7. 이중/삼중 보상형 — "회복 후 6개월 만에 통장과 인간관계가 함께 변한다"
+8. 인그룹 사회증명형 — "○○를 익힌 사람들의 5년 뒤가 완전히 다른 이유"
+
+[자연스러움 원칙 - 절대 어기지 말 것]
+- 어법 검사: 주어와 동사가 자연스럽게 연결되는가? ("회복이 굴러간다" X — 회복은 안 굴러감)
+- 추상 명사 의인화 금지: "○○가 멈춘다", "○○가 굴러간다", "○○ 위에 얹는다" (시스템/회복 같은 추상 명사를 사람/물건처럼)
+- 과장 형용사 금지: "흔적도 없다", "통째로", "완전히" (꼭 필요할 때만)
+- 추상 X, 구체 O: "많은 사람" → "월급 280만원짜리 7년차 회사원"
+- 도구/플랫폼명 적극: 네이버, 카카오, 노션, 카톡, 캘린더, 구글 시트
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚫 즉시 폐기 표현
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+특정 작가 고유어 (절대 금지): 자청 / 역행자 / 자의식 해체 / 유전자 역행 / 원시인 / 추월차선 / 아토믹 해빗 / 언카피어블
+AI 클리셰: 졸업 / 정체 / 마지막 한 수 / 다른 차원 / 결정적 시그널 / 진짜 게임 / 흔적도 없다 / 사건이 아니다 / 회로가 박혔다
+시스템 의인화: "○○가 멈춘 날", "○○ 위에 얹다", "○○를 졸업한", "회복이 굴러가다"
+뇌과학 비유 남용: "뇌 회로가 박혔다", "뇌 회로가 새로 깔린다" (전체 목차에 뇌·신경회로는 사실 진술로 1~2회만, 비유 남용 X)
+밍밍: 효과적인 / 성공적인 / ~의 모든 것 / ~하는 방법 / 알아야 할 / 의 중요성
+유치 비유: 나침반 / 열쇠 / 보물 / 황금 / 마법 / 파이프라인 / 엔진 / 톱니바퀴 / 사이클 / 눈덩이
+참고서: 첫걸음 / 완벽가이드 / 핵심정리 / 기초/중급/고급 / 첫 설계 / 첫 셋업
+챕터 제목 라벨: "발굴 —", "1단계:", "STEP 1." 같은 분리 형식
+의문문 문어체: "왜 ~는 ~하지 못하는가" 식의 한 PART에 1개까지만
+콜론(:) — 단 한 번도 쓰지 마라
+숫자 중복 금지: 전체 목차에서 같은 숫자(예: 3시간 + 3개월) 두 번 등장 금지
+숫자 표기 - 부호 금지: "-12%" "+30%" 같은 부호 사용 X. "12% 폭락에도", "30% 상승하면" 식으로
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 출력 형식 (이 형식 외 어떤 텍스트도 출력 금지)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PART 1. [13~18자, 좌절 + 통계 충격]
+- [통계 충격 또는 결정적 함정형]
+- [인지부조화/통념 박살형]
+- [패턴 - 위 8개 중 다른 것]
+- [컨셉명 첫 등장: 자연스러운 도입]
+
+PART 2. [13~18자, 통념 박살 + 뇌과학 권위]
+- [패턴]
+- [패턴 - 다른 것]
+- [패턴 - 또 다른 것]
+- [패턴 - 또 다른 것]
+
+PART 3. [13~18자, 첫 사건/결정적 순간]
+- [패턴]
+- [임박감/손해회피형]
+- [패턴]
+- [컨셉명 등장 가능: "○○○를 처음 적용한 사람들이 가장 먼저 느낀 변화" — PART 4에 넣을 거면 여기는 일반 패턴]
+
+PART 4. [13~18자, 정체성 전환 선언]
+- [컨셉명 등장 가능: "○○○가 본격 작동하는 4가지 신호" — PART 3에 안 넣었다면 여기에]
+- [뇌과학 권위형 또는 통계형]
+- [패턴]
+- [패턴]
+
+PART 5. [13~18자, 도약/이중 보상]
+- [호기심 갭형]
+- [이중/삼중 보상형]
+- [패턴 - 또 다른 것]
+- [컨셉명 세 번째 등장: 인그룹 사회증명]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 출력 전 자가 점검 (반드시 통과)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+출력 직전에 5가지 모두 통과해야 한다. 하나라도 No면 다시 써라.
+
+체크 1. 5개 챕터 제목만 이어 읽었을 때 "X였던 사람이 Y로 바뀐다"는 변화 서사가 또렷한가?
+체크 2. 통념 박살(인지부조화) 패턴이 5개 챕터+20개 소제목 안에 3개 이상 박혀있는가?
+체크 3. 구체적 숫자(시간/금액/비율)가 8개 이상 등장하는가?
+체크 4. 평이한 표현("~의 방법", "~의 모든 것", "~의 중요성", "효과적인", "성공적인")이 0개인가?
+체크 5. 5초간 훑어본 가상 독자가 "이건 안 사면 손해"라고 느낄 만한 손실회피 트리거가 챕터 제목 5개 중 2개 이상에 있는가?
+체크 6. 호기심 갭(결과만 보이고 방법/이유는 숨김)이 20개 소제목 중 10개 이상에 박혀 있는가? — "결과만 보이는데 본문을 사야 알 수 있는 한 줄"이 절반 이상이어야 결제 전환됨.
+체크 7. 컨셉명 글자 수를 단정하는 표현("세 글자", "네 글자", "단 한 단어")이 단 하나도 없는가? — 하나라도 있으면 즉시 전체 다시 쓰기.
+
+목차만 출력. 콜론 금지. 매 소제목 다른 패턴. 명사·동사 엔딩 섞기. 어법 어색한 표현 즉시 폐기. 각 PART는 정확히 소제목 4개. 컨셉명 글자수 단정 금지. 자가점검 결과는 출력하지 말 것."""
+
+        chapters = []
+        subtopics = {}
+        for _outline_attempt in range(2):
+            outline_result = ask_ai(outline_prompt, 0.85, ensure_quality=True)
+            if not outline_result:
+                continue
+
             chapters = []
             subtopics = {}
             current_ch = None
@@ -2575,26 +3093,31 @@ PART 5. [시스템 키워드]: [구체적 서브타이틀]
                 is_chapter = False
                 ch_name = None
 
+                # 마크다운 강조/헤더 기호를 벗겨낸 감지용 라인
+                # (신형 Claude 모델이 **PART 1. ...**, ## PART 1, > 등으로 헤더를 감싸 출력해도 인식)
+                detect_line = re.sub(r'^[\s>#\*_`~]+', '', line)
+                detect_line = re.sub(r'[\*_`~]+$', '', detect_line).strip()
+
                 # PART 1. 제목 형식
-                if re.match(r'^(PART|파트|Part)\s*\d+[\.\s]', line, re.IGNORECASE):
+                if re.match(r'^(PART|파트|Part)\s*\d+[\.\s]', detect_line, re.IGNORECASE):
                     is_chapter = True
-                    ch_name = line
+                    ch_name = detect_line
                 # Chapter 1. 제목 형식
-                elif re.match(r'^(Chapter|챕터)\s*\d+[\.\s]', line, re.IGNORECASE):
+                elif re.match(r'^(Chapter|챕터)\s*\d+[\.\s]', detect_line, re.IGNORECASE):
                     is_chapter = True
-                    ch_name = line
+                    ch_name = detect_line
                 # 마크다운 헤더 형식
                 elif re.match(r'^#+\s*(PART|파트|Chapter|챕터|\d+)', line, re.IGNORECASE):
                     is_chapter = True
                     ch_name = re.sub(r'^#+\s*', '', line)
                 # 1. 제목 형식 (숫자로 시작, 들여쓰기 없음)
-                elif re.match(r'^\d+[\.\)]\s', line) and not orig_line.startswith(' '):
+                elif re.match(r'^\d+[\.\)]\s', detect_line) and not orig_line.lstrip('*_`~ ').startswith(' '):
                     is_chapter = True
-                    ch_name = line
+                    ch_name = detect_line
                 # 【1부】 형식
-                elif re.match(r'^[【\[]?\s*\d+\s*(부|장|편)[】\]]?', line):
+                elif re.match(r'^[【\[]?\s*\d+\s*(부|장|편)[】\]]?', detect_line):
                     is_chapter = True
-                    ch_name = line
+                    ch_name = detect_line
 
                 if is_chapter and ch_name:
                     ch_name = re.sub(r'^[#\*\-\s]+', '', ch_name)
@@ -2630,23 +3153,27 @@ PART 5. [시스템 키워드]: [구체적 서브타이틀]
                     if is_subtopic and st_name:
                         st_name = st_name.replace('**', '').replace('*', '').replace('#', '').strip()
                         st_name = re.sub(r'^\d+[\.\)\:]\s*', '', st_name)  # 앞 숫자 제거
-                        if st_name and len(st_name) > 3 and len(subtopics[current_ch]) < 5:
+                        if st_name and len(st_name) > 3 and len(subtopics[current_ch]) < 4:
                             # 챕터 이름과 동일하면 스킵
                             if st_name.lower() != current_ch.lower() and st_name not in subtopics[current_ch]:
                                 subtopics[current_ch].append(st_name)
 
-            if chapters:
-                st.session_state['outline'] = chapters
-                st.session_state['chapters'] = {}
-                for ch in chapters:
-                    st.session_state['chapters'][ch] = {
-                        'subtopics': subtopics.get(ch, []),
-                        'subtopic_data': {s: {'questions': [], 'answers': [], 'content': ''} for s in subtopics.get(ch, [])}
-                    }
+            # 챕터가 충분히 파싱됐으면 재시도 중단, 부족하면 한 번 더 생성 시도
+            if len(chapters) >= 5:
+                break
+
+        if chapters:
+            st.session_state['outline'] = chapters
+            st.session_state['chapters'] = {}
+            for ch in chapters:
+                st.session_state['chapters'][ch] = {
+                    'subtopics': subtopics.get(ch, []),
+                    'subtopic_data': {s: {'questions': [], 'answers': [], 'content': ''} for s in subtopics.get(ch, [])}
+                }
 
         # 목차가 생성되지 않았으면 기본 목차 생성
         if not st.session_state.get('outline'):
-            progress_placeholder.warning("목차 파싱 실패, 기본 목차 생성 중...")
+            progress_placeholder.warning("⚠️ AI 목차 생성/파싱에 실패해 기본 목차를 사용합니다. (API 키·모델 설정을 확인하거나 다시 시도해 주세요)")
             default_chapters = [
                 "PART 1. 왜 지금인가",
                 "PART 2. 진짜 비밀",
@@ -2682,15 +3209,14 @@ PART 5. [시스템 키워드]: [구체적 서브타이틀]
         return False
 
 def regenerate_single_subtopic(chapter_name, subtopic_index, existing_subtopics):
-    """개별 소제목 AI 재생성 - 자청/프드프 스타일"""
+    """개별 소제목 AI 재생성 - 자기계발 베스트셀러 톤"""
     topic = st.session_state.get('topic', '')
     book_concept = st.session_state.get('book_concept', '')
 
     # 기존 소제목들 (중복 방지용)
     other_subtopics = [s for i, s in enumerate(existing_subtopics) if i != subtopic_index]
 
-    prompt = f"""당신은 자청, 프드프의 편집자입니다.
-목차만 보고 결제하게 만드는 소제목 하나를 써주세요.
+    prompt = f"""당신은 한국 자기계발 베스트셀러 편집자입니다. 목차만 보고 결제하게 만드는 소제목 하나를 써주세요.
 
 [책 컨셉]
 {book_concept}
@@ -2702,23 +3228,33 @@ def regenerate_single_subtopic(chapter_name, subtopic_index, existing_subtopics)
 {chr(10).join(f'- {s}' for s in other_subtopics)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 실제 베스트셀러 소제목 예시
-- "유전자를 역행하는 인간"
-- "당신의 뇌는 원시인이다"
-- "열심히 일하면 부자가 된다는 환상"
-- "노력이 배신하는 진짜 이유"
-- "돈을 끌어당기는 정체성"
+🔥 한국 자기계발 베스트셀러 톤 예시 (참고만, 그대로 베끼지 말 것)
+- "5분만에 돈 되는 사업 아이템 찾는 비법"
+- "월급 280만원이 월 1,000만원으로 바뀌기까지 47일"
+- "회사 몰래 부업하다 잘리는 직장인의 진짜 이유"
+- "노력이 결과로 안 바뀌는 결정적 함정"
+- "첫 정산 받고 인생이 달라진 그날의 기록"
 
-✅ 형식 (하나 선택):
-- 충격형: "~는 거짓말이다", "~하면 망한다"
-- 고백형: "나는 왜 ~했을까", "~를 깨닫기까지"
+✅ 형식 (하나 선택, 매번 다른 패턴):
+- 비법/법형: "5분만에 ~하는 비법", "~하는 정확한 방법"
+- 충격형: "~는 거짓말이다", "~하면 오히려 망한다"
+- 간증형: "~받고 인생이 달라졌다", "~를 깨닫기까지"
 - 도발형: "~은 필요 없다", "~만 있으면 된다"
 - 질문형: "왜 ~은 실패하는가"
+- 숫자형: "정확히 47일 만에 일어난 일"
+- 호기심 갭형(가장 강력): "월 500을 찍은 사람들이 가장 먼저 끊은 습관 한 가지" (결과만 보이고 방법은 숨김)
+
+🧲 호기심 갭 우선 — 결과/사건/디테일은 보이고, 원리/방법/순서는 숨기면 결제 전환률 폭증
+
+⚠️ 컨셉명을 쓰는 경우, 글자 수 단정 표현 절대 금지 ("세 글자", "네 글자", "단 한 단어" 등 — 컨셉명 길이와 안 맞으면 즉시 폐기)
 
 ❌ 금지:
+- 자청, 역행자, 유전자, 원시인, 추월차선 등 특정 작가 고유 표현
 - 설명서 표현: "~의 이해", "~하는 방법"
-- 유치한 비유: 나침반, 열쇠, 마법
+- 유치한 비유: 나침반, 열쇠, 마법, 톱니바퀴, 파이프라인
+- AI 어휘: 효과적인, 다양한, ~를 통해
 - 기존 소제목과 비슷한 패턴
+- 컨셉명 글자 수 단정 ("세 글자에서 시작한다" 류)
 
 소제목 하나만 (15~30자, 기호 없이):"""
 
@@ -2728,7 +3264,7 @@ def regenerate_single_subtopic(chapter_name, subtopic_index, existing_subtopics)
     return None
 
 def regenerate_chapter_subtopics(chapter_name, chapter_index):
-    """챕터의 모든 소제목 AI 재생성 - 자청/프드프 스타일"""
+    """챕터의 모든 소제목 AI 재생성 - 자기계발 베스트셀러 톤"""
     topic = st.session_state.get('topic', '')
     book_concept = st.session_state.get('book_concept', '')
     outline = st.session_state.get('outline', [])
@@ -2750,8 +3286,7 @@ def regenerate_chapter_subtopics(chapter_name, chapter_index):
     }
     current_role = chapter_roles.get(chapter_index, "핵심 내용 전달")
 
-    prompt = f"""당신은 자청, 프드프의 편집자입니다.
-이 챕터의 소제목 3개를 결제하고 싶게 써주세요.
+    prompt = f"""당신은 한국 자기계발 베스트셀러 편집자입니다. 이 챕터의 소제목 4개를 결제하고 싶게 써주세요.
 
 [책 컨셉]
 {book_concept}
@@ -2764,30 +3299,39 @@ def regenerate_chapter_subtopics(chapter_name, chapter_index):
 {chr(10).join(f'- {s}' for s in other_chapter_subtopics[:8])}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 실제 베스트셀러 소제목 예시
-- "유전자를 역행하는 인간"
-- "당신의 뇌는 원시인이다"
-- "열심히 일하면 부자가 된다는 환상"
-- "저축의 함정, 투자의 진실"
-- "멘탈이 무너지면 돈도 무너진다"
-- "운을 지배하는 자의 비밀"
+🔥 한국 자기계발 베스트셀러 톤 예시 (참고만, 그대로 베끼지 말 것)
+- "5분만에 돈 되는 사업 아이템 찾는 비법"
+- "월급 280만원이 월 1,000으로 바뀌기까지 47일"
+- "회사 몰래 부업하다 잘리는 직장인의 진짜 이유"
+- "첫 정산 받고 인생이 달라진 그날의 기록"
+- "노력이 결과로 안 바뀌는 결정적 함정"
+- "통장 잔고 23만원에서 시작한 한 가지 시도"
 
-✅ 각 소제목은 다른 형식으로:
-1번: 충격/반전형 (예: "~는 거짓말이다")
-2번: 고백/스토리형 (예: "나는 왜 ~했을까")
-3번: 선언/도발형 (예: "~만 있으면 된다")
+✅ 4개 소제목 모두 다른 형식으로 (4개 다 같은 패턴 금지):
+1번: 통계 충격/숫자형 (예: "정확히 47일째에 달라진 한 가지", "1년 안에 99%가 다시 무너지는 결정적 이유")
+2번: 간증/사건형 (예: "27만원짜리 첫 정산서가 알려준 한 가지", "~받고 인생이 달라진 그날")
+3번: 충격/통념 박살형 (예: "노력할수록 가난해진다", "~만 있으면 된다")
+4번: 호기심 갭형 (결과만 보이고 방법은 숨김 — 예: "월 500을 찍은 사람들이 가장 먼저 끊은 습관 한 가지", "성공한 부업러가 매일 밤 11시에 반드시 끄는 것")
+
+🧲 호기심 갭 규칙 (반드시 4개 중 1개 이상 포함)
+   - 결과/사건/디테일은 보이고, 원리/방법/순서는 숨겨라
+   - "방법", "비법", "노하우"로 끝내면 갭이 닫혀 결제 안 함
+   - 한 줄에 "묘하게 구체적인 디테일 + 의문"이 같이 있어야 작동
+
+⚠️ 컨셉명을 쓰는 경우, 글자 수 단정 표현 절대 금지 ("세 글자", "네 글자", "단 한 단어" 등)
 
 ❌ 금지:
-- 설명서 표현: "~의 이해", "~하는 방법", "효과적인"
-- 유치한 비유: 나침반, 열쇠, 마법
+- 자청, 역행자, 유전자, 원시인, 추월차선 등 특정 작가 고유 표현
+- 설명서 표현: "~의 이해", "~하는 방법", "효과적인", "다양한"
+- 유치한 비유: 나침반, 열쇠, 마법, 톱니바퀴, 파이프라인
 - 같은 패턴 반복
 
-소제목 3개만 출력 (줄바꿈으로 구분, 기호/번호 없이):"""
+소제목 정확히 4개만 출력 (줄바꿈으로 구분, 기호/번호 없이, 각 줄 15~30자):"""
 
     result = ask_ai(prompt, 0.8)
     if result:
         lines = [line.strip().strip('"').strip("'").strip('-').strip() for line in result.strip().split('\n') if line.strip() and len(line.strip()) > 5]
-        return lines[:3] if lines else None
+        return lines[:4] if lines else None
     return None
 
 def generate_body_from_outline(interview_data, progress_placeholder):
@@ -2833,119 +3377,126 @@ def generate_body_from_outline(interview_data, progress_placeholder):
                 prev_summary = "\n".join(prev_contents[-5:] + current_ch_prev) if (prev_contents or current_ch_prev) else "없음"
 
                 # 소제목 인덱스에 따라 다른 시작 스타일 선택
+                # 더 다양한 시작 스타일 (15가지)
                 hook_styles = [
-                    "질문으로 시작 (예: '왜 우리는 항상 실패할까요?')",
-                    "고백으로 시작 (예: '솔직히 말하면, 저도 처음엔 몰랐습니다.')",
-                    "반전 사실로 시작 (예: '대부분의 사람들이 믿는 것과 정반대였습니다.')",
-                    "통계/숫자로 시작 (예: '92%가 이 실수를 반복합니다.')",
-                    "에피소드로 시작 (예: '어느 날 친구에게서 연락이 왔습니다.')",
-                    "선언으로 시작 (예: '결론부터 말하겠습니다. 방법은 하나입니다.')",
+                    "도발적 질문 (예: '왜 99%는 이걸 모를까요?')",
+                    "충격적 고백 (예: '저도 3년간 완전히 잘못하고 있었습니다.')",
+                    "반전 사실 (예: '사실 정반대였습니다.')",
+                    "구체적 숫자 (예: '정확히 47일 만에 달라졌습니다.')",
+                    "생생한 에피소드 (예: '그날 카페에서 노트북을 열었을 때였습니다.')",
+                    "단호한 선언 (예: '결론부터 말씀드리겠습니다.')",
+                    "대화체 시작 (예: '\"이게 진짜 돼요?\" 처음 들었을 때 저도 그랬습니다.')",
+                    "before/after (예: '6개월 전만 해도 저는 완전히 다른 사람이었습니다.')",
+                    "상식 뒤집기 (예: '노력하면 된다? 완전히 틀렸습니다.')",
+                    "비유로 시작 (예: '이건 마치 고장난 네비게이션을 따라가는 것과 같습니다.')",
+                    "독자 공감 (예: '혹시 이런 경험 있으신가요?')",
+                    "미래 제시 (예: '3개월 후, 완전히 다른 결과를 보게 될 겁니다.')",
+                    "실패담 (예: '처음엔 완전히 망했습니다.')",
+                    "발견의 순간 (예: '그때 깨달았습니다. 방법이 틀렸던 거였죠.')",
+                    "핵심 한 줄 (예: '핵심은 딱 하나입니다.')",
                 ]
                 current_hook_style = hook_styles[done % len(hook_styles)]
 
-                content_prompt = f"""당신은 전세계 베스트셀러 작가들의 기법을 마스터한 작가입니다.
+                # 저자 이름 가져오기
+                author_name = interview_data.get('author_name', '') or st.session_state.get('author_name', '') or '저자'
 
-🚨🚨🚨 최우선 규칙 (반드시 지켜라) 🚨🚨🚨
+                content_prompt = f"""당신은 한국 자기계발 베스트셀러 작가입니다. 첫 문장으로 독자를 멈춰 세우고, 권석천 기자 칼럼처럼 정확한 디테일과 통찰로 끝까지 끌고 가는 본문을 씁니다.
+
+🚨🚨🚨 최우선 규칙 🚨🚨🚨
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. 독자/타겟을 직접 부르지 마라. 절대 금지.
-   ❌ "김대리님", "30대 직장인 여러분", "주부님들"
-   ❌ "초보자 분들", "직장인이라면", "당신은"
-   ✅ "저는", "우리는" 정도만 사용
+1. 첫 문장이 가장 중요! 반드시 이 스타일로 시작:
+   👉 {current_hook_style}
 
-2. 이전 글과 다른 시작으로 시작해라!
-   이번 글은 반드시: {current_hook_style}
-   ❌ 매번 같은 패턴 금지 (날짜+상황, 고백, 질문 등)
-   ❌ "20XX년 X월" 형식의 날짜로 시작 금지
+2. 이전 내용과 절대 중복 금지!
+   아래 내용은 이미 썼으니 완전히 다른 이야기를 해라:
+   {prev_summary}
+
+3. 독자 직접 호칭 금지
+   ❌ "여러분", "당신", "독자님", "~하시는 분들"
+   ✅ "저는", "우리는", "제가"
+
+4. 특정 작가 고유 표현 절대 금지 (저작권/표절 위험)
+   ❌ "자청", "자청아", "자청씨"
+   ❌ "역행자", "유전자 역행", "유전자 오작동", "자의식 해체"
+   ❌ "원시인", "추월차선", "아토믹 해빗", "언카피어블"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [집필 정보]
 주제: {topic}
 챕터: {ch}
-현재 작성할 소제목: {sub}
+소제목: {sub}
 핵심 방법론: {interview_data.get('core_method', '')}
 
-[이 책의 고유 컨셉]
+[책 컨셉]
 {book_concept}
 
-[이미 작성된 내용 - 중복 금지]
-{prev_summary}
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✍️ 글쓰기 스타일
+✍️ 본문 톤: 자기계발 후킹 + 권석천 칼럼 깊이
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[문체] 자청 스타일 합쇼체만 사용:
-- "~입니다", "~습니다", "~거든요", "~더라고요", "~잖아요"
-- "저는 ~했습니다", "그게 ~였죠", "~한 거죠"
+[문체]
+- 합쇼체 기본 ("~입니다", "~합니다") + 가끔 구어체 ("~거든요", "~더라고요")
+- 현재 시제로 장면을 그리듯
+- 짧은 문장과 긴 문장을 교차해 리듬을 만듦
+- 추상보다 구체. "많은 사람" → "월급 280만원짜리 7년차 회사원"
+- 결론부터, 분석은 그 다음
 
-[구성]
-- 본문은 하나의 이야기처럼 자연스럽게 흘러가야 함
-- 문단과 문단을 자연스럽게 연결
-- 반전이나 깨달음 포인트 하나 포함
+[권석천식 깊이 - 칼럼처럼 인과를 추적]
+- 사실 → 분석 → 통찰 순서로 전개
+- 가설 검증식 흐름: "왜 그럴까. 이유를 되짚어봤습니다"
+- 사회적 맥락이나 통계, 책/논문 인용 자연스럽게 섞기
+- 결론을 강요하지 말고, 독자가 스스로 깨닫게 단서를 깔기
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 구체적인 실행 방법 (가장 중요!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-✅ 초보자도 바로 따라할 수 있게:
-- 방법을 알려줄 때는 "무엇을 → 어디서 → 어떻게" 순서로
-- 예: "네이버에 접속해서 → 검색창에 '주제+정보' 입력 → 연관검색어 5개 메모"
-- 예: "엑셀을 열고 → A열에 키워드 입력 → B열에 검색량 입력 → 내림차순 정렬"
-- 추상적 설명 금지 ("분석하세요", "파악하세요", "연구하세요")
-- 구체적 도구/사이트명 언급 (네이버, 구글, 블랙키위, 키워드마스터 등)
-
-✅ 예시 인물 사용 시:
-- "김씨", "이씨", "박씨" 금지
-- 자연스러운 가명 사용: "민준이라는 친구", "직장인 수현", "블로거 지우씨"
-- 또는 "제 수강생 중 한 분", "저와 함께 시작한 동료"
-
-✅ 고급스러운 표현:
-- "생명 주기" → "성장 곡선", "발전 단계"
-- "돈 버는" → "수익을 창출하는", "경제적 자유를 얻는"
-- "쉽게" → "효율적으로", "체계적으로"
-- "열심히" → "꾸준히", "전략적으로"
+[자기계발식 후킹 - 뇌를 멈춰 세우는 첫 문장]
+- 사건/숫자/대사/의문 중 하나로 시작 (일반론 절대 금지)
+- 본문 중간에 작은 반전 1회 ("그런데 진짜 흥미로운 건 그 다음이었습니다")
+- 마지막 문장은 발견의 결과로서의 통찰 한 줄
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚫 절대 금지 표현
+🎯 구체성을 끝까지 밀어붙여라
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-❌ 유치하거나 어색한 표현:
-- "후다닥", "슝슝", "쭉쭉", "팡팡", "뿅뿅"
-- "ㅇㅇ조", "ㅋㅋ", "ㅎㅎ", 인터넷 신조어
-- "짜잔", "두둥", "쨘", 효과음
-- "레알", "진짜루", "완전", "대박" 등 구어체
+✅ 숫자: "많이" X → "월 340만원, 정확히 47일" O
+✅ 도구/플랫폼: 네이버, 카카오, 노션, 카톡, 구글 시트 등 실제 이름
+✅ 실행 순서: "무엇을 → 어디서 → 어떻게" 명시
 
-❌ 유치한 비유:
-- "마법", "연금술", "황금", "열쇠", "보물", "나침반", "지도"
-- "저수지", "날개", "로켓", "엔진", "머신", "파이프라인"
-- "~이 보이는", "~을 여는", "~의 비밀"
-
-❌ AI스러운 표현:
-- "중요합니다", "따라서", "결론적으로"
-- "~하는 것이 좋습니다", "~해야 합니다"
-
-❌ 반말/높임 금지:
-- "~다", "~해", "~해라", "~하자" (X)
-- "~하셔야 합니다", "~하시면" (X)
-
-❌ 형식 금지:
-- 소제목/번호 나열 ("1.", "2.", "첫째", "둘째")
-- 마크다운/이모지
-- 글머리 기호 (-, •, *)
+✅ 사례:
+- 내 경험: "제가 처음 시작했을 때", "그날 회의실에서"
+- 타인 사례: 수강생, 지인 (이름은 가끔만, 매번 X)
+- 사례 없어도 OK. 일반적 원리·논리 전개로 충분
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📏 분량: 1500~1800자
+🚫 절대 금지
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ 자청, 역행자, 자의식 해체, 유전자 역행, 원시인, 추월차선, 아토믹 해빗 (특정 작가/책 고유 표현)
+❌ 같은 이름 반복 (민준, 지수가 계속 나오면 안 됨)
+❌ "김씨", "이씨" 같은 성씨 호칭
+❌ 유치한 표현: 후다닥, 짜잔, 대박, ㅋㅋ, 어마어마한
+❌ 유치한 비유: 마법, 황금열쇠, 나침반, 로켓, 눈덩이
+❌ 억지 메타포: 순환법, 엔진, 고리, 파이프라인, 톱니바퀴
+❌ AI스러운: 중요합니다, 따라서, 결론적으로, ~를 통해, 다양한, 효과적인, 진정한
+❌ 형식: 1. 2. 첫째, 둘째, 글머리 기호, 이모지
+❌ HTML 태그나 표 사용 금지
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📏 분량: 1800~2200자
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-'{sub}' 본문을 작성하세요.
-- 이번 글 시작: {current_hook_style}
-- 자연스러운 흐름으로 1500~1800자
-- 반전/깨달음 하나 필수
-- 이전 글과 완전히 다른 톤으로 시작"""
+'{sub}' 본문 작성.
+- 시작: {current_hook_style}
+- 이전 내용과 완전히 다른 새로운 이야기
+- 권석천 칼럼처럼 사실 → 분석 → 통찰 순서로 인과를 추적
+- 마지막 한 줄에 발견된 통찰 하나
+- 순수 텍스트만 (HTML/표 금지)
 
-                content = ask_ai(content_prompt, 0.7)
+⛔ 절대 금지: 본문 첫 줄에 소제목('{sub}')을 다시 쓰지 마라.
+   소제목은 위에 이미 표시되므로, 본문은 곧장 첫 후킹 문장으로 시작한다.
+   ❌ 잘못: "{sub}\\n\\n그날 새벽 두 시였습니다..." (소제목 반복)
+   ✅ 올바름: "그날 새벽 두 시였습니다..." (바로 본문 시작)"""
+
+                content = ask_ai(content_prompt, 0.7, ensure_quality=True)
                 if content:
-                    content = clean_content(content)  # 이모티콘/마크다운 제거
+                    content = clean_content(content, subtopic=sub)  # 이모티콘/마크다운 제거 + 소제목 중복 제거
                     ch_data['subtopic_data'][sub]['content'] = content
 
         # 완료 처리
@@ -3270,84 +3821,64 @@ JSON:
 
 
 def generate_titles_bestseller(topic, persona, pains):
-    prompt = f"""당신은 교보문고 베스트셀러 TOP 20 제목만 분석하는 전문가입니다.
+    prompt = f"""당신은 교보문고 종이책 베스트셀러와 크몽·클래스101 전자책 베스트셀러를 동시에 분석하는 제목 카피라이터입니다.
 
 주제: {topic}
-독자 고민: {pains}
+독자: {persona}
+독자의 고민: {pains}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏆 교보문고 TOP 20 제목 패턴 분석
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+가장 중요한 규칙 (이걸 어기면 전부 실패)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+제목은 반드시 "실제로 말이 되는 자연스러운 한국어 한 구절"이어야 합니다.
+주제에서 뽑은 단어들을 기계적으로 이어 붙이지 마세요.
 
-[패턴 1: 한 단어 임팩트]
-• 역행자 → 동사의 명사화, 강렬한 의미
-• 초격차 → 신조어 창조
-• 불변 → 한자어 한 단어
-• 그릿 → 영어 한 단어
+❌ 단어 짜깁기 실패 (절대 이렇게 만들지 말 것):
+  "수면 매출 설계도"  → 수면+매출+설계도, 서로 관계없는 명사를 그냥 붙인 말
+  "다이어트 부자 공식"  → 의미가 안 통하는 조합
+  "관계 성장 엔진"      → 추상명사만 나열
+  이런 제목은 소리내어 읽으면 "이게 무슨 말이지?" 싶고, 어떤 서점에도 존재하지 않습니다.
 
-[패턴 2: 명사+의+명사 (새로운 개념)]
-• 돈의 속성 → 익숙한 것에 낯선 단어 결합
-• 부의 추월차선 → 은유적 표현
-• 생각의 지도 → 추상적 조합
+✅ 자연스러운 제목 = 사람이 실제로 쓰는 어순과 의미가 살아있는 구절
+  (수면 주제 예) "잠든 사이 일어나는 일" / "초저녁의 기술" / "다시 잠드는 법"
 
-[패턴 3: 형용사+명사]
-• 단단한 삶 → 고급스러운 형용사
-• 고요한 용기 → 역설적 조합
-• 아주 작은 습관의 힘 → 구체적 수식
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+두 시장의 제목 문법
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[종이책 베스트셀러 — 품격·여운]
+  돈의 속성 / 불변의 법칙 / 마흔에 읽는 쇼펜하우어 / 역행자 / 세이노의 가르침
+  → 명사+의+명사, 한 단어 임팩트, 약간의 문학성. 광고 냄새가 없다.
 
-[패턴 4: 영문 느낌]
-• 언스크립티드 → 영어 그대로
-• 더 해빙 → 영어+한글
+[전자책 베스트셀러 — 구체적 약속·호기심]
+  크몽·클래스101 상위권은 "독자가 무엇을 얻는지"가 살짝 드러난다.
+  단, 유치하지 않게. "~하는 법/방법/노하우/비법/공식" 같은 흔한 꼬리표는 피하고,
+  의외의 단어나 시선 전환을 한 번 넣어 호기심을 만든다.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⛔ 절대 금지 (유치한 제목 = 판매 실패)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+피해야 할 것
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- 의미 없는 명사 나열 (가장 큰 실패 원인)
+- 비밀/비법/공식/바이블/마법/머니/시스템/파이프라인/연금술
+- 완벽한·궁극의·최고의·기적의 같은 과장 형용사
+- "월 1000만원" 류 숫자 과시, "직장인을 위한" 류 타겟 명시
 
-[유튜브/블로그 냄새]
-X "~하는 법", "~하는 방법", "~가이드", "~노하우"
-X "월 1000만원", "100일 만에" (숫자 과시)
-X "부자되는", "성공하는", "돈버는" (뻔한 동사)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+출력
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+'{topic}' 주제로 서로 다른 결의 제목을 정확히 5개.
+(3개는 종이책 품격 톤, 2개는 전자책 호기심 톤)
+길이는 자유 — 보통 2~7어절. 짧게 만드는 것보다 자연스러움이 우선이다.
 
-[인터넷 광고 냄새]
-X "비밀", "비법", "공식", "정석", "바이블"
-X "마법", "연금술", "황금", "보물", "열쇠"
-X "머니", "캐시", "머신", "시스템", "파이프라인"
-X "터보", "부스터", "로켓"
+각 제목마다 self_check를 채워, 소리내어 읽었을 때 말이 되는지 스스로 검증할 것.
+self_check가 "어색하다/말이 안 된다"면 그 제목은 버리고 다시 만들 것.
 
-[게임/판타지 냄새]
-X "레벨업", "스킬", "공략", "정복", "마스터"
-X "무기", "전투", "퀘스트"
-
-[과장/저렴함]
-X "완벽한", "궁극의", "최고의", "기적의"
-X "30대를 위한", "직장인을 위한" (타겟 명시)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ 제목 검증 기준
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. 교보문고 베스트셀러 코너에 진열해도 품격이 유지되는가?
-2. "역행자" 옆에 놓아도 어색하지 않은가?
-3. 유튜브 썸네일이나 블로그 제목 같지 않은가?
-4. 1~3단어로 강렬한가?
-5. "이게 뭐지?" 궁금증이 생기는가?
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-'{topic}' 주제로 교보문고 품격의 제목 5개 생성.
-각 제목은 서로 다른 패턴으로.
-
-JSON:
+JSON만 출력:
 {{
     "titles": [
-        {{"title": "제목 (1~3단어)", "subtitle": "부제 (15자 이내)", "concept": "컨셉 한줄"}},
-        {{"title": "제목", "subtitle": "부제", "concept": "컨셉"}},
-        {{"title": "제목", "subtitle": "부제", "concept": "컨셉"}},
-        {{"title": "제목", "subtitle": "부제", "concept": "컨셉"}},
-        {{"title": "제목", "subtitle": "부제", "concept": "컨셉"}}
+        {{"title": "제목", "subtitle": "호기심을 더하는 부제 한 줄 (20자 이내)", "concept": "이 제목이 매력적인 이유 한 줄", "self_check": "소리내어 읽으면 자연스러운가에 대한 한 문장 자기검증"}}
     ]
 }}"""
-    return ask_ai(prompt, 0.75)
+    return ask_ai(prompt, 0.6, ensure_quality=True)
 
 
 def analyze_text_content(text, source=""):
@@ -3431,96 +3962,328 @@ JSON:
 
 
 def generate_outline(topic, persona, pains, gaps=None):
-    """자청/프드프 스타일 자극적 목차 생성"""
-    prompt = f"""당신은 자청입니다. 목차만 보고 결제하게 만드세요.
+    """한국 자기계발 베스트셀러 톤: 결제 버튼을 누르게 하는 자극형 목차"""
+
+    # 페르소나/고통/시장 빈틈 정리 (있으면 활용, 없어도 작동)
+    persona_block = f"[타겟 독자]\n{persona}\n" if persona else ""
+    if isinstance(pains, list):
+        pains_text = "\n".join(f"- {p}" for p in pains if p)
+    else:
+        pains_text = str(pains) if pains else ""
+    pains_block = f"[독자가 지금 느끼는 통증]\n{pains_text}\n" if pains_text else ""
+    if gaps:
+        gaps_text = "\n".join(f"- {g}" for g in gaps) if isinstance(gaps, list) else str(gaps)
+        gaps_block = f"[시장의 빈틈 - 경쟁자가 안 다루는 것]\n{gaps_text}\n"
+    else:
+        gaps_block = ""
+
+    prompt = f"""당신은 한국 자기계발 분야 톱 0.1% 기획자입니다. 서점에서 단 5초간 목차만 본 사람이 책을 손에서 못 놓게 만드는 5장짜리 목차를 씁니다.
+
+목차의 단 하나의 목적: 독자가 "이 책을 안 읽으면 평생 손해"라고 느끼게 만드는 것.
+정보 전달은 본문이 한다. 목차는 100% 구매심리만 다룬다.
 
 [주제]: {topic}
-
+{persona_block}{pains_block}{gaps_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 자청/프드프 실제 목차 (이대로 써라)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[자청 - 역행자]
-PART 1. 자의식 해체
-- 왜 당신의 노력은 물거품이 되는가
-- 유전자를 역행하는 법
-
-PART 2. 정체성
-- 스스로를 속여야 이긴다
-- 운은 컨트롤할 수 있다
-
-[프드프 스타일]
-PART 1. 착각
-- 열심히 하면 된다는 거짓말
-- 99%가 실패하는 진짜 이유
-
-PART 2. 구조
-- 돈이 들어오는 시스템
-- 1%만 아는 수익 공식
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 자극적 소제목 공식 (이 중에서 골라 써라)
+🛒 구매 결정 5초 룰 (모든 규칙 중 1순위)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-• "99%가 모르는 ~"
-• "왜 ~하면 망하는가"
-• "~는 거짓말이다"
-• "~의 진짜 이유"
-• "이것만 알면 상위 1%"
-• "딱 하나만 바꿨더니"
+독자는 목차를 5초만 본다. 그 5초 안에 다음 3가지가 동시에 작동해야 결제한다.
 
-[챕터명] - 2~4글자, 명사형
-착각 / 거짓말 / 함정 / 구조 / 공식 / 실행 / 전환 / 도약
+[1] 정체성 변화 발견 — "이걸 읽으면 나는 OO한 사람이 된다"
+   → 5개 챕터 제목을 이어 읽으면 한 사람의 결정적 변화가 보여야 한다.
+   ✅ "단단해진 멘탈은 인생을 통째로 바꾼다" (변화 서사 O)
+   ❌ "멘탈 관리의 다양한 기법" (정체성 변화 X — 즉시 폐기)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚫 유치한 표현 (하나라도 있으면 탈락)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2] 손실회피 작동 — "이걸 모르면 평생 OO한다"
+   → 통념 박살(인지부조화) 챕터/소제목이 최소 3개 들어가야 한다.
+   ✅ "의지로 버틴 사람일수록 더 크게 무너진다"
+   ❌ "멘탈 관리의 중요성" (잃을 게 안 보임)
 
-나침반/지도/열쇠/보물/황금/마법/연금술/비밀무기
-첫걸음/가이드/완벽/핵심전략/기초/중급/고급
-로켓/터보/엔진/머신/파이프라인/저수지/샘물
-~의 모든 것/~하는 방법/효과적인/성공적인
-"~이 보이는 나침반", "~을 여는 열쇠", "~의 비밀"
+[3] 구체성 — 추상 명사 1개당 구체적 숫자/장면 1개
+   → "많은 사람" 금지, "월급 280만원짜리 7년차 회사원" 가능
+   → 시간(90초, 47일), 금액(34만원, 1억), 비율(99%, 8할) 적극 사용
+
+25줄(챕터 5 + 소제목 20) 중 한 줄이라도 "그냥 정보"가 섞이면 그 목차는 평이해진다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 마케팅 뇌과학 8대 트리거 (목차 전체에 골고루 박을 것)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-## PART 1. [2~4글자 명사]
-- [자극적 소제목]
-- [자극적 소제목]
-- [자극적 소제목]
+1. **손해회피 + 충격 통계** — "1년 안에 99%가 다시 무너진다", "1억치 강의 들어도 망한다"
+2. **인지부조화/통념 박살** — "의지로 버틴 사람일수록 더 크게 무너진다", "노력할수록 가난해진다"
+3. **권위 어휘 (과학/임상)** — 뇌, 신경회로, N주 후, 임상, 데이터, 알고리즘
+4. **임박감 + 절대성** — "이 90초를 놓치면 며칠 걸린다", "다시는 ~하지 않는다"
+5. **정체성 전환 약속** — "회복한 뇌는 다시 무너지지 않는다", "단단해진 사람은 ~한다"
+6. **인그룹 사회증명** — "○○를 익힌 사람들의 5년 뒤", "상위 1%만 도달하는"
+7. **이중/삼중 보상** — "통장과 인간관계가 함께 변한다", "돈도 사람도 따라온다"
+8. **호기심 갭** — "두 달 안에 가장 먼저 끊은 한 가지", "정확히 어디부터 멈추는가"
 
-## PART 2. [2~4글자 명사]
-- [자극적 소제목]
-- [자극적 소제목]
-- [자극적 소제목]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧲 호기심 갭(Information Gap) 강화 — 결제를 부르는 가장 강력한 무기
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-## PART 3. [2~4글자 명사]
-- [자극적 소제목]
-- [자극적 소제목]
-- [자극적 소제목]
+조지 로웬스타인의 정보격차 이론: 사람은 자기가 모르는 것이 '뭔지'는 알지만 '내용'은 모를 때 가장 강하게 끌린다. 25줄 중 최소 10줄에 이 갭을 박아야 목차만 보고 결제한다.
 
-## PART 4. [2~4글자 명사]
-- [자극적 소제목]
-- [자극적 소제목]
-- [자극적 소제목]
+[호기심 갭 6대 공식 - 결과만 보이고 방법/이유는 본문으로 미루기]
 
-## PART 5. [2~4글자 명사]
-- [자극적 소제목]
-- [자극적 소제목]
-- [자극적 소제목]
+1. **숫자 + 미공개 결과** — '정확히/딱'으로 시작해 결과만 보여주고 내용은 숨기기
+   ✅ "정확히 47일째에 통장이 처음 뒤집힌 그 순간"
+   ✅ "27만원짜리 첫 정산서가 알려준 단 한 가지"
+   ❌ "47일 만에 돈을 버는 방법" (방법을 다 보여줘버림 → 결제 안 함)
 
-목차만 출력."""
-    return ask_ai(prompt, 0.4)
+2. **이미 벌어진 사건 + 원인 숨김** — '왜?'를 유발하는 결과만
+   ✅ "3년 차 베테랑이 신입에게 6개월 만에 따라잡힌 단 하나의 이유"
+   ✅ "월 1,000을 찍은 사람들이 가장 먼저 끊은 습관 한 가지"
+
+3. **묘하게 구체적인 행동/대상 + 이유 숨김** — 디테일이 호기심을 폭발시킨다
+   ✅ "성공한 부업러가 매일 밤 11시에 반드시 끄는 것"
+   ✅ "1년 만에 1억 모은 사람들이 절대 안 쓰는 5단어"
+   ✅ "월 500 넘긴 사람들 카톡 프로필에서 사라진 한 단어"
+
+4. **반대 결과 미스터리** — 통념과 정반대 결과만 던지고 메커니즘은 본문
+   ✅ "더 열심히 할수록 더 가난해진 7년의 비밀"
+   ✅ "잠을 늘렸더니 매출이 2배가 된 이상한 메커니즘"
+
+5. **'딱 하나' 절대성** — 수많은 변수 중 단 하나만 보여주기
+   ✅ "월 100 / 월 500을 가르는 단 한 줄의 차이"
+   ✅ "결국 모든 게 무너지는 사람들의 공통점 단 하나"
+
+6. **시간 압축 미스터리** — 짧은 시간에 큰 일이 일어났는데 그 사이를 숨기기
+   ✅ "퇴근 후 90분이 1년 뒤 인생을 갈라놓는다"
+   ✅ "주말 4시간이 5년치 월급을 바꾼 그 과정"
+
+[호기심 갭 만들 때 절대 어기지 말 것]
+• 답을 같은 줄에 다 보여주지 마라. "왜 ~한가" "어떻게 ~하는가"로 끝나면 본문을 사야 알 수 있게.
+• "방법" "비법" "노하우" 같은 말로 끝내면 갭이 닫힘 → 결제 안 함.
+• 결과/사건/디테일은 보이고, 원리/메커니즘/순서는 숨겨라.
+• 한 줄 안에 "장면 + 의문"이 같이 있어야 호기심이 작동한다.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 단 하나의 미션
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5개 챕터 제목만 빠르게 이어 읽었을 때 한 사람의 변화 이야기가 보이고, 한 줄 한 줄이 다음 챕터를 못 참게 만들어야 한다.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📐 챕터 제목 형식 (가장 중요)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[형식]
+- 13~18자의 자연스러운 한국어 한 문장
+- 단어 한두 개짜리 라벨 금지, 라벨 분리(— ㅣ :) 금지
+- 평서문 또는 단언형. "~이유"로 끝나는 설명체는 한 PART에만 사용
+- 명사 엔딩과 동사 엔딩을 챕터별로 섞어라 (5개 모두 명사 엔딩 금지)
+- 5개를 이으면 [좌절 → 통념 박살 → 첫 사건 → 안정화 → 도약]의 5막
+
+[좋은 예 - 성공적인 멘탈 관리 비결]
+PART 1. 1년 안에 99%가 다시 무너지는 결정적 이유
+PART 2. 의지로 잡으려는 순간 뇌는 반대로 움직인다
+PART 3. 회복의 8할이 결판나는 폭발 직후 90초
+PART 4. 한 번 회복한 뇌는 다시는 무너지지 않는다
+PART 5. 단단해진 멘탈은 인생을 통째로 바꾼다
+
+[좋은 예 - 30대 직장인 N잡 월 500]
+PART 1. 직장인 99%가 부업 30일을 못 버티는 이유
+PART 2. 노력보다 자리가 먼저다
+PART 3. 첫 30만원이 통장에 찍힌 그날
+PART 4. 새벽 3시에도 매출이 들어온다
+PART 5. 월 500 다음, 억대 수익으로 가는 길
+
+[나쁜 예 - 즉시 폐기]
+- "발굴", "폭로", "전환" 같은 한두 단어짜리
+- "발굴 — 부업의 90%는 첫 단추에서 망한다" (라벨 + 대시)
+- "DPS의 첫 관문, 노력 없이도 돈이 따라오는 자리를 찾는 법" (시스템명 라벨화 + 너무 김)
+- "이제 무너지는 게 더 이상 사건이 아니다" (사건이 아니다 ← 말이 안 됨)
+- "한 번 흔들려도 다음 날엔 흔적도 없다" (AI식 과장)
+- "월수도 시스템의 첫 설계" (의미 불명 + 설계라는 설명체 어휘)
+- "MDS 파이프라인" (파이프라인이라는 영어 외래어를 시스템 접미사로)
+- "주가 -12% 떨어져도 매도 안 하는 뇌 회로가 박혔다" (뇌 회로가 박히다 = 어법 어색, 비유 남용)
+- "신경회로가 새로 깔리고 있다는 신호" 류 (한 번까진 OK, 같은 비유 두 번 X)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💎 책의 시그니처 컨셉 (필수) - 작명 규칙 엄격
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+먼저 책의 시그니처 컨셉명을 하나 만든다.
+
+[좋은 컨셉명 형식]
+✅ 영문 3~4자 약어 (반드시 발음 가능 + 의미 있어야 함):
+   - DPS (Discover-Plug-Scale), ARC (Awareness-Reset-Control)
+   - PAM (Prompt-Automate-Monetize), RFM (Recency-Frequency-Monetary)
+   - BTS, TRE, KFC, ZAP 식의 강한 자음 조합
+
+✅ 깔끔한 한글 합성어 (3~5자):
+   - 복리 자산 공식, 단단한 매출 구조, 안전 마진 법칙
+
+[즉시 폐기 - 어색한 작명]
+❌ 의미·발음이 어색한 한글:
+   - "월수도", "수익도", "월500", "월천만", "부자도" (의미가 바로 안 잡히는 한글)
+❌ 시스템 접미사로 영어 외래어 사용:
+   - 파이프라인, 모듈, 엔진, 회로, 시너지, 매트릭스, 어레이, 클러스터, 프레임워크, 인프라
+   → "MDS 파이프라인" "ABC 모듈" "XYZ 엔진" 같이 박는 즉시 탈락
+   ✅ 반드시 "○○○ 시스템 / 공식 / 구조 / 법칙" 중 하나로 끝낼 것
+❌ 단어가 길거나 너무 직설적인 한글 합성:
+   - "잠자는 동안 매출 굴러가는 시스템" (설명체)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 컨셉명 등장 규칙 - 3번, 자연스럽게 분산
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+이 컨셉명을 5개 PART 안에 정확히 3곳에 등장시킨다:
+
+⚠️ 컨셉명 글자 수/단어 수를 단정하는 표현 절대 금지 (가장 자주 어기는 실수!)
+   ❌ "○○○ 세 글자에서 시작한다" — 컨셉명이 3글자 아니면 거짓말이 됨
+   ❌ "○○○ 네 글자만 기억하라" — 글자 수 단정 금지
+   ❌ "단 한 단어가 모든 걸 바꾼다" — 단어 수 단정 금지
+   ✅ 컨셉명이 'DPS'(3자)든 '단단한 매출 구조'(8자)든 '복리 자산 공식'(7자)이든 모두 자연스럽게 작동하는 문장만 사용
+
+1. **PART 1 마지막 소제목** (도입) — 아래 풀에서 1개 선택, 컨셉명 글자 수와 무관하게 자연스러운 것
+   - 예: "결국 모든 답은 '○○○' 안에 있었다"
+   - 예: "이 책의 모든 페이지는 '○○○' 하나를 향해 간다"
+   - 예: "지금부터 '○○○' 단 하나만 기억하면 된다"
+   - 예: "여기서부터 진짜 이야기, '○○○'가 시작된다"
+   - 예: "마지막에 도달하는 곳은 결국 '○○○'다"
+   - 예: "'○○○'를 만나기 전과 후는 완전히 다른 게임이다"
+
+2. **PART 3 또는 PART 4 안 (1곳)** (작동·전환점)
+   - 예: "○○○가 본격 작동하기 시작하는 4가지 신호"
+   - 예: "○○○를 처음 적용한 사람들이 가장 먼저 느낀 변화"
+   - 예: "○○○가 통장에 처음 흔적을 남기는 순간"
+   - 예: "○○○ 한 달 차에 가장 먼저 무너지는 한 가지"
+
+3. **PART 5 마지막 소제목** (확장/사회증명)
+   - 예: "○○○를 익힌 사람들의 5년 뒤가 완전히 다른 이유"
+   - 예: "○○○로 자리잡은 사람들이 다시는 돌아가지 않는 이유"
+   - 예: "○○○ 이후, 1년 만에 가장 크게 달라지는 단 한 가지"
+
+❌ 챕터 제목에는 컨셉명 절대 등장 X (5개 챕터 제목엔 안 들어감)
+❌ 매 PART에 박지 말 것. 정확히 3곳.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✍️ 소제목 톤: 한국 자기계발 베스트셀러 + 마케팅 뇌과학
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+각 PART당 소제목 4개. 모두 다른 패턴 + 명사·동사 엔딩 섞기 (4개 모두 같은 엔딩 금지).
+
+[좋은 패턴 풀 - 매번 다르게]
+1. 통계 충격형 — "1년 안에 99%가 다시 무너진다", "한 달 차에 90%가 다시 무너지는 정확한 이유"
+2. 인지부조화형 — "의지로 버틴 사람일수록 더 크게 무너진다"
+3. 뇌과학 권위형 — "감정이 폭발할 때 뇌는 정확히 어디부터 멈추는가", "신경회로가 새로 깔리고 있다는 4가지 신호"
+4. 임박감/손해회피형 — "이 90초를 놓치면 다시 일어서는 데 며칠이 걸린다"
+5. 정체성 전환형 — "한 번 회복한 뇌는 다시는 무너지지 않는다"
+6. 호기심 갭형 — "단번에 회복한 사람들이 모두 무의식적으로 하는 행동"
+7. 이중/삼중 보상형 — "회복 후 6개월 만에 통장과 인간관계가 함께 변한다"
+8. 인그룹 사회증명형 — "○○를 익힌 사람들의 5년 뒤가 완전히 다른 이유"
+
+[자연스러움 원칙 - 절대 어기지 말 것]
+- 어법 검사: 주어와 동사가 자연스럽게 연결되는가? ("회복이 굴러간다" X — 회복은 안 굴러감)
+- 추상 명사 의인화 금지: "○○가 멈춘다", "○○가 굴러간다", "○○ 위에 얹는다" (시스템/회복 같은 추상 명사를 사람/물건처럼)
+- 과장 형용사 금지: "흔적도 없다", "통째로", "완전히" (꼭 필요할 때만)
+- 추상 X, 구체 O: "많은 사람" → "월급 280만원짜리 7년차 회사원"
+- 도구/플랫폼명 적극: 네이버, 카카오, 노션, 카톡, 캘린더, 구글 시트
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚫 즉시 폐기 표현
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+특정 작가 고유어 (절대 금지): 자청 / 역행자 / 자의식 해체 / 유전자 역행 / 원시인 / 추월차선 / 아토믹 해빗 / 언카피어블
+AI 클리셰: 졸업 / 정체 / 마지막 한 수 / 다른 차원 / 결정적 시그널 / 진짜 게임 / 흔적도 없다 / 사건이 아니다 / 회로가 박혔다
+시스템 의인화: "○○가 멈춘 날", "○○ 위에 얹다", "○○를 졸업한", "회복이 굴러가다"
+뇌과학 비유 남용: "뇌 회로가 박혔다", "뇌 회로가 새로 깔린다" (전체 목차에 뇌·신경회로는 사실 진술로 1~2회만, 비유 남용 X)
+밍밍: 효과적인 / 성공적인 / ~의 모든 것 / ~하는 방법 / 알아야 할 / 의 중요성
+유치 비유: 나침반 / 열쇠 / 보물 / 황금 / 마법 / 파이프라인 / 엔진 / 톱니바퀴 / 사이클 / 눈덩이
+참고서: 첫걸음 / 완벽가이드 / 핵심정리 / 기초/중급/고급 / 첫 설계 / 첫 셋업
+챕터 제목 라벨: "발굴 —", "1단계:", "STEP 1." 같은 분리 형식
+의문문 문어체: "왜 ~는 ~하지 못하는가" 식의 한 PART에 1개까지만
+콜론(:) — 단 한 번도 쓰지 마라
+숫자 중복 금지: 전체 목차에서 같은 숫자(예: 3시간 + 3개월) 두 번 등장 금지
+숫자 표기 - 부호 금지: "-12%" "+30%" 같은 부호 사용 X. "12% 폭락에도", "30% 상승하면" 식으로
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 출력 형식 (이 형식 외 어떤 텍스트도 출력 금지)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[책 시그니처 컨셉]
+○○○ + (시스템/구조/공식/알고리즘) | 한 줄 설명
+
+PART 1. [13~18자, 좌절 + 통계 충격]
+- [통계 충격 또는 결정적 함정형]
+- [인지부조화/통념 박살형]
+- [패턴 - 위 8개 중 다른 것]
+- [컨셉명 첫 등장: 자연스러운 도입]
+
+PART 2. [13~18자, 통념 박살 + 뇌과학 권위]
+- [패턴]
+- [패턴 - 다른 것]
+- [패턴 - 또 다른 것]
+- [패턴 - 또 다른 것]
+
+PART 3. [13~18자, 첫 사건/결정적 순간]
+- [패턴]
+- [임박감/손해회피형]
+- [패턴]
+- [컨셉명 등장 가능: "○○○를 처음 적용한 사람들이 가장 먼저 느낀 변화" — PART 4에 넣을 거면 여기는 일반 패턴]
+
+PART 4. [13~18자, 정체성 전환 선언]
+- [컨셉명 등장 가능: "○○○가 본격 작동하는 4가지 신호" — PART 3에 안 넣었다면 여기에]
+- [뇌과학 권위형 또는 통계형]
+- [패턴]
+- [패턴]
+
+PART 5. [13~18자, 도약/이중 보상]
+- [호기심 갭형]
+- [이중/삼중 보상형]
+- [패턴 - 또 다른 것]
+- [컨셉명 세 번째 등장: 인그룹 사회증명]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 출력 전 자가 점검 (반드시 통과)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+출력 직전에 5가지 모두 통과해야 한다. 하나라도 No면 다시 써라.
+
+체크 1. 5개 챕터 제목만 이어 읽었을 때 "X였던 사람이 Y로 바뀐다"는 변화 서사가 또렷한가?
+체크 2. 통념 박살(인지부조화) 패턴이 5개 챕터+20개 소제목 안에 3개 이상 박혀있는가?
+체크 3. 구체적 숫자(시간/금액/비율)가 8개 이상 등장하는가?
+체크 4. 평이한 표현("~의 방법", "~의 모든 것", "~의 중요성", "효과적인", "성공적인")이 0개인가?
+체크 5. 5초간 훑어본 가상 독자가 "이건 안 사면 손해"라고 느낄 만한 손실회피 트리거가 챕터 제목 5개 중 2개 이상에 있는가?
+체크 6. 호기심 갭(결과만 보이고 방법/이유는 숨김)이 20개 소제목 중 10개 이상에 박혀 있는가? — "결과만 보이는데 본문을 사야 알 수 있는 한 줄"이 절반 이상이어야 결제 전환됨.
+체크 7. 컨셉명 글자 수를 단정하는 표현("세 글자", "네 글자", "단 한 단어")이 단 하나도 없는가? — 하나라도 있으면 즉시 전체 다시 쓰기.
+
+목차만 출력. 콜론 금지. 매 소제목 다른 패턴. 명사·동사 엔딩 섞기. 어법 어색한 표현 즉시 폐기. 각 PART는 정확히 소제목 4개. 컨셉명 글자수 단정 금지. 자가점검 결과는 출력하지 말 것."""
+    return ask_ai(prompt, 0.85, ensure_quality=True)
 
 
 def generate_content_premium(subtopic, chapter, questions, answers, topic, persona):
-    """짧지만 밀도 높은 몰입형 글쓰기"""
+    """자기계발 후킹 + 권석천 칼럼 깊이의 몰입형 본문"""
+    import random
+
     qa_pairs = ""
     for i, (q, a) in enumerate(zip(questions, answers), 1):
         if a.strip():
             qa_pairs += f"\n질문{i}: {q}\n답변{i}: {a}\n"
 
-    prompt = f"""'{subtopic}'에 대해 글을 씁니다.
+    # 다양한 시작 스타일
+    hook_styles = [
+        "도발적 질문으로 시작 (예: '왜 99%는 여기서 실패할까요?')",
+        "충격적 고백으로 시작 (예: '저도 2년간 완전히 틀리고 있었습니다.')",
+        "반전 사실로 시작 (예: '사실 정반대였습니다.')",
+        "구체적 숫자로 시작 (예: '정확히 23일 만에 달라졌습니다.')",
+        "생생한 에피소드로 시작 (예: '그날 밤 컴퓨터 앞에서 깨달았습니다.')",
+        "단호한 선언으로 시작 (예: '핵심부터 말씀드리겠습니다.')",
+        "대화체로 시작 (예: '\"진짜요?\" 처음 들었을 때 저도 의심했습니다.')",
+        "before/after로 시작 (예: '1년 전의 저는 완전히 다른 상황이었습니다.')",
+        "상식 뒤집기로 시작 (예: '열심히 하면 된다? 틀렸습니다.')",
+        "사건 장면으로 시작 (예: '2023년 3월의 일이었습니다.')",
+        "인용으로 시작 (예: '한 후배가 이런 말을 했습니다.')",
+    ]
+    current_hook = random.choice(hook_styles)
+
+    # 표 포함 여부 (랜덤하게 30% 확률)
+    include_table = random.random() < 0.3
+
+    prompt = f"""당신은 한국 자기계발 베스트셀러 작가입니다. '{subtopic}'에 대해 첫 문장으로 독자를 멈춰 세우고, 권석천 기자 칼럼처럼 정확한 디테일과 통찰로 끝까지 끌고 가는 본문을 씁니다.
 
 [주제]: {topic}
 [챕터]: {chapter}
@@ -3528,104 +4291,78 @@ def generate_content_premium(subtopic, chapter, questions, answers, topic, perso
 {qa_pairs}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-핵심 원칙: 짧게. 임팩트 있게.
+🔥 첫 문장이 전부다
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1500~1800자. 이 안에서 끝내라.
-길면 지루하다. 짧고 강렬하게.
-핵심만 남기고 다 쳐내라.
+반드시 이 스타일로 시작:
+👉 {current_hook}
+
+(일반론·교훈으로 시작하면 즉시 폐기. 사건/숫자/대사/의문 중 하나로만 시작)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 글 구조: 반전이 있어야 한다
+✍️ 본문 톤: 자기계발 후킹 + 권석천 칼럼 깊이
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[도입] 후킹 (1~2문단)
-- "대부분 여기서 틀립니다." / "솔직히 말할게요."
+[문체]
+- 합쇼체 기본 ("~입니다", "~합니다") + 가끔 구어체 ("~거든요", "~더라고요")
+- 현재 시제로 장면을 그리듯
+- 짧은 문장과 긴 문장을 교차해 리듬
+- 추상보다 구체. "많은 사람" → "월급 280만원짜리 7년차 회사원"
 
-[전개] 상식 뒤집기 (2문단)
-- "저도 그렇게 생각했습니다. 근데 반대였습니다."
+[권석천식 깊이]
+- 사실 → 분석 → 통찰 순서로 전개
+- 가설 검증식 흐름: "왜 그럴까. 이유를 되짚어봤습니다"
+- 사회적 맥락이나 통계, 책/논문 인용을 자연스럽게 섞기
+- 결론 강요 X, 독자가 스스로 깨닫게 단서를 깔기
 
-[반전] 핵심 인사이트 (2~3문단)
-- "근데 진짜 중요한 건 따로 있었습니다."
-- 숫자로 증명
+[자기계발식 후킹]
+- 첫 문장: 사건/숫자/대사/의문
+- 본문 중간: 작은 반전 1회 ("그런데 진짜 흥미로운 건 그 다음이었습니다")
+- 마지막 문장: 발견의 결과로서의 통찰 한 줄
 
-[마무리] 액션 (1문단)
-- 당장 할 수 있는 것 하나
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 전문성 = 인사이더 정보
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-읽고 나서 "이 사람 진짜 해본 사람이네" 느끼게 해라.
-
-이렇게 써라:
-- "대부분 A라고 생각하는데, 실제로는 B입니다"
-- "책에선 안 나오는데, 현장에서는..."
-- "97%가 모르는 게 있습니다"
-- "저도 3번 실패하고 나서야 알았습니다"
-
-구체적인 숫자를 써라:
-- ✗ "많이 벌었습니다" → ✓ "월 340만원"
-- ✗ "오래 걸렸습니다" → ✓ "47일"
-- ✗ "효과가 좋습니다" → ✓ "전환율 3.7배"
+[표 포함: {'예' if include_table else '아니오'}]
+{'''
+📊 본문 중간에 비교표 1개 필수:
+<table style="width:100%; border-collapse:collapse; margin:20px 0;">
+<tr style="background:#1a1a1a;"><th style="border:1px solid #333;padding:12px;color:#C9A24B;">구분</th><th style="border:1px solid #333;padding:12px;color:#C9A24B;">기존 방식</th><th style="border:1px solid #333;padding:12px;color:#C9A24B;">새로운 방식</th></tr>
+<tr><td style="border:1px solid #333;padding:10px;">항목</td><td style="border:1px solid #333;padding:10px;">내용</td><td style="border:1px solid #333;padding:10px;">내용</td></tr>
+</table>
+''' if include_table else ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚨 절대 금지
+🎯 구체성을 끝까지
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-❌ 유치한 비유 (이거 쓰면 글 망함)
-- "마법", "연금술", "황금", "열쇠", "보물", "나침반", "지도"
-- "저수지", "날개", "로켓", "엔진", "머신", "파이프라인"
-- "~이 보이는", "~을 여는", "~의 세계로", "~의 비밀"
-→ 비유 쓰지 마라. 사실만 담담하게.
-
-❌ 설명형 글쓰기
-- "OOO란 무엇인가요?"
-- "~에 대해 알아보겠습니다"
-→ 설명하지 말고 보여줘라
-
-❌ AI 표현
-- "중요합니다", "따라서", "결론적으로"
-- "~하는 것이 좋습니다"
-
-❌ 타겟 직접 언급 (절대 금지!)
-- "김대리님", "30대 직장인 여러분" 금지
-- "주부 여러분", "초보자 분들" 금지
-- "당신"도 남발 금지
-- "저", "우리" 정도만 써라
-
-❌ 뻔한 조언
-- "꾸준히 하세요", "포기하지 마세요"
-
-❌ 소제목/번호
-- "1. / 2. / 3." 나열 금지
-- 소설처럼 자연스럽게 연결
-
-❌ 마크다운/이모지
-- **굵게**, - 글머리, 🔥 금지
+- 숫자: "많이" X → "월 340만원, 정확히 47일" O
+- 사례: 수강생/지인/현장 (이름은 가끔만)
+- 실제 도구명: 네이버, 카카오, 노션, 구글 시트 등
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ 예시 (이 길이로 써라)
+🚫 절대 금지
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-"대부분 A가 정답이라고 생각합니다. 저도 그랬습니다.
-
-근데 A를 3개월 했을 때 결과는 0이었습니다.
-
-B로 바꿨습니다. 2주 만에 47만원이 찍혔습니다.
-
-핵심은 간단합니다. [구체적 방법]. 업계에선 이걸 'OOO'라고 부릅니다.
-
-지금 바로 해보세요."
+❌ 자청, 역행자, 자의식 해체, 유전자 역행, 원시인, 추월차선, 아토믹 해빗 (특정 작가/책 고유 표현)
+❌ 유치한 비유: 마법, 황금열쇠, 나침반, 로켓, 눈덩이, 톱니바퀴, 파이프라인
+❌ AI 어휘: 중요합니다, 따라서, 결론적으로, ~를 통해, 다양한, 효과적인, 진정한
+❌ 직접 호칭: 여러분, 당신, 독자님
+❌ 형식: 1. 2. 첫째, 글머리 기호, 이모지
+❌ 같은 이름 반복 (민준, 지수가 계속 X)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📏 분량: 1500~1800자 (절대 넘기지 마라)
+📏 분량: 1800~2200자
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-- 짧은 문장. 2~3문장이 한 문단.
-- 문체: ~입니다 / ~거든요 / ~더라고요
-- 도표는 꼭 필요할 때만"""
-    return ask_ai(prompt, 0.75)
+'{subtopic}' 본문 작성.
+- 시작: {current_hook}
+- 권석천 칼럼처럼 사실 → 분석 → 통찰 순서로 인과 추적
+- 마지막 한 줄에 발견된 통찰 하나
+- {'비교표 1개 포함' if include_table else '순수 텍스트만'}
+
+⛔ 절대 금지: 본문 첫 줄에 소제목('{subtopic}')을 다시 쓰지 마라.
+   소제목은 위에 이미 표시되므로, 본문은 곧장 첫 후킹 문장으로 시작한다.
+   ❌ 잘못: "{subtopic}\\n\\n그날 새벽 두 시였습니다..." (소제목 반복)
+   ✅ 올바름: "그날 새벽 두 시였습니다..." (바로 본문 시작)"""
+    return ask_ai(prompt, 0.75, ensure_quality=True)
 
 
 def format_content_html(content):
@@ -3641,6 +4378,8 @@ def format_content_html(content):
     # 단일 줄바꿈 제거 (문단 내 연결)
     formatted = formatted.replace('\n', ' ')
     formatted = f'<p style="color:#000000;margin:25px 0;line-height:2.0;font-size:17px;">{formatted}</p>'
+    # 빈 <p> 태그 정리
+    formatted = re.sub(r'<p[^>]*>\s*</p>', '', formatted)
     return formatted
 
 
@@ -3657,81 +4396,113 @@ Q3: [질문]"""
 # 메인 UI
 # ==========================================
 # 비디오 배경 헤더
-video_path = "/Users/hyunwoo/Desktop/title_bg.mp4"
-header_video_b64 = get_video_base64(video_path)
+# title_bg.mp4 를 (1) 스크립트와 같은 폴더, (2) 바탕화면, (3) 실행 폴더 순으로 탐색
+def _find_header_video():
+    candidates = []
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(os.path.join(_here, "title_bg.mp4"))
+    except Exception:
+        pass
+    candidates.append(os.path.expanduser("~/Desktop/title_bg.mp4"))
+    candidates.append(os.path.join(os.getcwd(), "title_bg.mp4"))
+    candidates.append("/Users/hyunwoo/Desktop/title_bg.mp4")
+    for _p in candidates:
+        if _p and os.path.exists(_p):
+            return _p
+    return None
+
+video_path = _find_header_video()
+header_video_b64 = get_video_base64(video_path) if video_path else None
 
 if header_video_b64:
     st.markdown(f"""
     <style>
-    @keyframes writeyGlow {{
-        0%, 100% {{ text-shadow: 0 0 20px rgba(212,175,55,0.5), 0 0 40px rgba(212,175,55,0.3), 0 0 60px rgba(212,175,55,0.2); }}
-        50% {{ text-shadow: 0 0 30px rgba(212,175,55,0.8), 0 0 60px rgba(212,175,55,0.5), 0 0 90px rgba(212,175,55,0.3); }}
+    .writey-brandbar {{
+        display:flex; align-items:center; justify-content:space-between;
+        padding:15px 24px; border-bottom:0.5px solid rgba(255,255,255,0.06);
+        margin-bottom:30px;
     }}
-    @keyframes gradientMove {{
-        0% {{ background-position: 0% 50%; }}
-        50% {{ background-position: 100% 50%; }}
-        100% {{ background-position: 0% 50%; }}
-    }}
-    @keyframes subtitleFade {{
-        0%, 100% {{ opacity: 0.7; }}
-        50% {{ opacity: 1; }}
-    }}
+    .writey-wordmark {{ font-size:18px; font-weight:500; letter-spacing:0.18em; color:#F5F3EF; }}
+    .writey-cashtag {{ font-size:10px; letter-spacing:0.28em; color:#7A776F; margin-left:10px; }}
+    .writey-author {{ font-size:11px; letter-spacing:0.1em; color:#7A776F; }}
     .writey-title {{
-        font-family: 'Playfair Display', 'Cormorant Garamond', serif !important;
-        font-size: 90px !important;
-        font-weight: 700 !important;
-        font-style: italic;
-        background: linear-gradient(135deg, #fff 0%, #d4af37 25%, #fff 50%, #d4af37 75%, #fff 100%);
-        background-size: 300% 300%;
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        animation: gradientMove 4s ease infinite, writeyGlow 3s ease-in-out infinite;
+        font-family: 'S-CoreDream','Pretendard',sans-serif !important;
+        font-size: 60px !important;
+        font-weight: 300 !important;
+        letter-spacing: 0.16em;
+        text-indent: 0.16em;
         margin: 0;
-        letter-spacing: 8px;
+        background: linear-gradient(180deg,#FFFFFF 0%,#F4ECD4 52%,#D8B45E 130%);
+        -webkit-background-clip: text !important;
+        background-clip: text !important;
+        -webkit-text-fill-color: transparent !important;
+        filter: drop-shadow(0 2px 14px rgba(201,162,75,0.28));
     }}
-    .writey-subtitle {{
-        font-family: 'Cinzel', serif !important;
-        color: rgba(212,175,55,0.9) !important;
-        font-size: 15px !important;
-        letter-spacing: 8px !important;
-        margin-bottom: 15px;
+    .writey-eyebrow {{
+        display:flex; align-items:center; justify-content:center; gap:16px;
+        margin-bottom: 22px;
+    }}
+    .writey-eyebrow .we-text {{
+        color: #E8Cf8C !important;
+        font-size: 11px !important;
+        letter-spacing: 0.45em !important;
+        text-indent: 0.45em;
         font-weight: 500;
-        text-transform: uppercase;
     }}
+    .writey-eyebrow .we-line-l {{ width:30px; height:1px; background:linear-gradient(90deg,transparent,#C9A24B); }}
+    .writey-eyebrow .we-line-r {{ width:30px; height:1px; background:linear-gradient(90deg,#C9A24B,transparent); }}
+    .writey-divider {{
+        display:flex; align-items:center; justify-content:center; gap:10px; margin:24px auto 0;
+    }}
+    .writey-divider .wd-line-l {{ width:42px; height:1px; background:linear-gradient(90deg,transparent,#C9A24B); }}
+    .writey-divider .wd-line-r {{ width:42px; height:1px; background:linear-gradient(90deg,#C9A24B,transparent); }}
+    .writey-divider .wd-diamond {{ width:5px; height:5px; background:#C9A24B; transform:rotate(45deg); box-shadow:0 0 8px rgba(201,162,75,0.7); }}
     .writey-tagline {{
-        color: rgba(255,255,255,0.85) !important;
-        font-size: 20px !important;
-        margin-top: 20px;
+        color: #8A8780 !important;
+        font-size: 15px !important;
+        margin-top: 18px;
         font-weight: 300;
-        letter-spacing: 3px;
-        animation: subtitleFade 4s ease-in-out infinite;
+        letter-spacing: 0.03em;
     }}
     </style>
-    <div style="position:relative;border-radius:24px;overflow:hidden;margin-bottom:35px;box-shadow:0 15px 50px rgba(0,0,0,0.5), 0 0 100px rgba(212,175,55,0.1);">
-        <video autoplay muted loop playsinline style="width:100%;height:320px;object-fit:cover;filter:brightness(0.3) saturate(1.2);">
+    <div class="writey-brandbar">
+        <div><span class="writey-wordmark">WRITEY</span><span class="writey-cashtag">CASHMAKER</span></div>
+        <span class="writey-author">남현우 작가</span>
+    </div>
+    <div style="position:relative;border-radius:16px;overflow:hidden;margin-bottom:35px;border:0.5px solid rgba(201,162,75,0.18);">
+        <video autoplay muted loop playsinline style="width:100%;height:300px;object-fit:cover;filter:brightness(0.28) saturate(1.1);">
             <source src="data:video/mp4;base64,{header_video_b64}" type="video/mp4">
         </video>
-        <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(180deg, rgba(0,0,0,0.2) 0%, rgba(0,0,0,0.4) 100%);"></div>
+        <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(180deg, rgba(11,11,13,0.4) 0%, rgba(11,11,13,0.7) 100%);"></div>
         <div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;">
-            <div class="writey-subtitle">✦ PREMIUM AI E-BOOK STUDIO ✦</div>
-            <h1 class="writey-title">Writey</h1>
-            <p class="writey-tagline">아이디어부터 출판까지, AI 원스톱 전자책 제작</p>
+            <div class="writey-eyebrow"><span class="we-line-l"></span><span class="we-text">PREMIUM EBOOK MAKER</span><span class="we-line-r"></span></div>
+            <h1 class="writey-title">WRITEY</h1>
+            <div class="writey-divider"><span class="wd-line-l"></span><span class="wd-diamond"></span><span class="wd-line-r"></span></div>
+            <p class="writey-tagline">6개의 질문에 답하면 AI가 목차부터 본문까지 완성합니다</p>
         </div>
     </div>
     """, unsafe_allow_html=True)
 else:
     st.markdown("""
-    <style>
-    @keyframes writeyGlowFallback {{
-        0%, 100% {{ text-shadow: 0 0 20px rgba(212,175,55,0.5); }}
-        50% {{ text-shadow: 0 0 40px rgba(212,175,55,0.8); }}
-    }}
-    </style>
-    <div style="text-align:center;padding:60px 20px;margin-bottom:30px;background:linear-gradient(180deg, rgba(20,20,20,0.9) 0%, rgba(10,10,10,0.95) 100%);border-radius:20px;border:1px solid rgba(212,175,55,0.2);">
-        <div style="color:rgba(212,175,55,0.9);font-size:14px;letter-spacing:6px;margin-bottom:15px;font-weight:500;">✦ PREMIUM AI E-BOOK STUDIO ✦</div>
-        <h1 style="font-family:'Playfair Display',serif;font-size:72px;font-weight:700;font-style:italic;color:#d4af37;margin:0;letter-spacing:6px;animation:writeyGlowFallback 3s ease-in-out infinite;">Writey</h1>
-        <p style="color:rgba(255,255,255,0.7);font-size:18px;margin-top:20px;letter-spacing:2px;">아이디어부터 출판까지, AI 원스톱 전자책 제작</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:15px 24px;border-bottom:0.5px solid rgba(255,255,255,0.06);margin-bottom:30px;">
+        <div><span style="font-size:18px;font-weight:500;letter-spacing:0.18em;color:#F5F3EF;">WRITEY</span><span style="font-size:10px;letter-spacing:0.28em;color:#7A776F;margin-left:10px;">CASHMAKER</span></div>
+        <span style="font-size:11px;letter-spacing:0.1em;color:#7A776F;">남현우 작가</span>
+    </div>
+    <div style="position:relative;text-align:center;padding:66px 20px 54px;margin-bottom:30px;background:radial-gradient(ellipse at 50% 0%, rgba(201,162,75,0.12) 0%, rgba(11,11,13,0) 62%), #0B0B0D;border-radius:18px;border:1px solid rgba(201,162,75,0.28);box-shadow:inset 0 0 70px rgba(201,162,75,0.05), 0 22px 60px rgba(0,0,0,0.45);overflow:hidden;">
+        <div style="position:absolute;top:0;left:50%;transform:translateX(-50%);width:170px;height:1px;background:linear-gradient(90deg,transparent,rgba(201,162,75,0.75),transparent);"></div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:24px;">
+            <span style="width:30px;height:1px;background:linear-gradient(90deg,transparent,#C9A24B);"></span>
+            <span style="font-size:11px;letter-spacing:0.45em;color:#C9A24B;font-weight:500;text-indent:0.45em;">PREMIUM EBOOK MAKER</span>
+            <span style="width:30px;height:1px;background:linear-gradient(90deg,#C9A24B,transparent);"></span>
+        </div>
+        <h1 style="font-family:'S-CoreDream','Pretendard',sans-serif;font-size:58px;font-weight:300;letter-spacing:0.16em;margin:0;text-indent:0.16em;background:linear-gradient(180deg,#FFFFFF 0%,#F0E6CC 52%,#C9A24B 128%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;">WRITEY</h1>
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin:24px auto 0;">
+            <span style="width:42px;height:1px;background:linear-gradient(90deg,transparent,#C9A24B);"></span>
+            <span style="width:5px;height:5px;background:#C9A24B;transform:rotate(45deg);box-shadow:0 0 8px rgba(201,162,75,0.6);"></span>
+            <span style="width:42px;height:1px;background:linear-gradient(90deg,#C9A24B,transparent);"></span>
+        </div>
+        <p style="color:#9A968C;font-size:15px;margin-top:20px;font-weight:300;letter-spacing:0.04em;">6개의 질문에 답하면 AI가 목차부터 본문까지 완성합니다</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -3767,7 +4538,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 1: 기본 정보 ==========
     if step == 1:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">👋 먼저 당신에 대해 알려주세요</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">전자책의 저자로서 기본 정보를 입력해주세요</p>
         </div>
@@ -3799,7 +4570,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 2: 주제와 노하우 ==========
     elif step == 2:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">📚 어떤 내용을 담을까요?</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">당신만의 핵심 노하우를 알려주세요</p>
         </div>
@@ -3831,7 +4602,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 3: 타겟 독자 (AI 추천) ==========
     elif step == 3:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">🎯 누구를 위한 책인가요?</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">AI가 시장 데이터를 분석해 최적의 타겟을 추천해드립니다</p>
         </div>
@@ -3862,7 +4633,7 @@ if not st.session_state.get('interview_completed', False):
             for idx, persona in enumerate(personas[:3]):
                 is_selected = (idx == selected_idx)
                 border_color = "var(--gold)" if is_selected else "var(--line)"
-                bg_color = "rgba(212,175,55,0.1)" if is_selected else "rgba(20,20,20,0.5)"
+                bg_color = "rgba(201,162,75,0.1)" if is_selected else "rgba(20,20,20,0.5)"
 
                 pain_list = persona.get('pain_points', [])[:3]
                 pains_text = " / ".join(pain_list) if pain_list else "고민 분석 중..."
@@ -3929,7 +4700,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 4: 스토리 & 경력 ==========
     elif step == 4:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">💪 당신의 이야기를 들려주세요</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">독자들이 공감할 수 있는 진솔한 경험담과 경력</p>
         </div>
@@ -3961,7 +4732,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 5: 마무리 ==========
     elif step == 5:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">✨ 마지막으로!</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">독자에게 전하고 싶은 메시지</p>
         </div>
@@ -4013,7 +4784,7 @@ if not st.session_state.get('interview_completed', False):
     # ========== STEP 6: 목차 확인 및 본문 생성 ==========
     elif step == 6:
         st.markdown("""
-        <div style="background:linear-gradient(135deg, rgba(212,175,55,0.1) 0%, rgba(183,110,121,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
+        <div style="background:linear-gradient(135deg, rgba(201,162,75,0.1) 0%, rgba(201,162,75,0.05) 100%);padding:30px;border-radius:15px;border-left:4px solid var(--gold);margin-bottom:30px;">
             <h3 style="color:var(--gold);margin:0 0 10px 0;">📋 목차 확인 및 수정</h3>
             <p style="color:var(--text);margin:0;opacity:0.9;">생성된 목차를 확인하고, 직접 수정하거나 AI로 재생성할 수 있습니다</p>
         </div>
@@ -4026,7 +4797,7 @@ if not st.session_state.get('interview_completed', False):
 
         if book_title:
             st.markdown(f"""
-            <div style="background:rgba(30,30,30,0.9);padding:25px;border-radius:15px;border:2px solid var(--gold);margin-bottom:20px;text-align:center;">
+            <div style="background:rgba(30,30,30,0.9);padding:25px;border-radius:15px;border:0.5px solid var(--gold);margin-bottom:20px;text-align:center;">
                 <h2 style="color:var(--gold);margin:0 0 10px 0;font-size:32px;">{book_title}</h2>
                 <p style="color:var(--text2);margin:0;font-size:18px;">{subtitle}</p>
             </div>
@@ -4036,7 +4807,7 @@ if not st.session_state.get('interview_completed', False):
         if book_concept:
             with st.expander("💡 이 책의 고유 컨셉 보기", expanded=False):
                 st.markdown(f"""
-                <div style="background:rgba(212,175,55,0.1);padding:20px;border-radius:10px;border-left:3px solid var(--gold);">
+                <div style="background:rgba(201,162,75,0.1);padding:20px;border-radius:10px;border-left:3px solid var(--gold);">
                     {book_concept.replace(chr(10), '<br>')}
                 </div>
                 """, unsafe_allow_html=True)
@@ -4057,7 +4828,7 @@ if not st.session_state.get('interview_completed', False):
 
                 # 챕터 헤더
                 st.markdown(f"""
-                <div style="background:linear-gradient(90deg, rgba(212,175,55,0.2) 0%, rgba(30,30,30,0.9) 100%);
+                <div style="background:linear-gradient(90deg, rgba(201,162,75,0.2) 0%, rgba(30,30,30,0.9) 100%);
                             padding:15px 20px;border-radius:10px;margin:20px 0 10px 0;
                             border-left:4px solid var(--gold);">
                     <span style="color:var(--gold);font-weight:bold;font-size:18px;">PART {i+1}</span>
@@ -4120,15 +4891,6 @@ if not st.session_state.get('interview_completed', False):
                     st.session_state['current_page'] = 7  # 최종 출력 페이지로 이동
                     st.rerun()
 
-    # 기존 방식 사용 옵션
-    st.markdown("---")
-    st.markdown("<div style='text-align:center;'>", unsafe_allow_html=True)
-    if st.button("📝 전자책 상세 작성 (전문가용)", key="skip_interview"):
-        st.session_state['interview_completed'] = True
-        st.session_state['current_page'] = 0
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
     st.stop()
 
 # ==========================================
@@ -4171,8 +4933,8 @@ st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 # API 키가 없으면 환영 화면 표시
 if not get_api_key():
     st.markdown("""
-    <div style="background:linear-gradient(135deg, rgba(212,175,55,0.2) 0%, rgba(30,30,30,0.98) 100%);
-                border:3px solid rgba(212,175,55,0.6);border-radius:25px;padding:50px 40px;text-align:center;margin:20px 0;">
+    <div style="background:linear-gradient(135deg, rgba(201,162,75,0.2) 0%, rgba(30,30,30,0.98) 100%);
+                border:0.5px solid rgba(201,162,75,0.4);border-radius:25px;padding:50px 40px;text-align:center;margin:20px 0;">
         <p style="font-size:60px;margin:0 0 20px 0;">👋</p>
         <h2 style="color:var(--gold);font-size:42px;margin-bottom:20px;font-weight:700;">환영합니다!</h2>
         <p style="color:var(--text);font-size:24px;margin-bottom:10px;line-height:1.8;">
@@ -4189,7 +4951,7 @@ if not get_api_key():
     <div style="background:#1a1a2e;border:3px solid #e74c3c;padding:30px;border-radius:20px;margin:30px 0;">
         <p style="font-size:28px;margin:0;line-height:1.6;color:#fff;text-align:center;">
             🔑 <b style="color:#e74c3c;">첫 번째 할 일</b><br><br>
-            <span style="font-size:24px;">👈 왼쪽에 <span style="color:#d4af37;font-weight:700;">"API 키"</span>를 넣어야 해요</span>
+            <span style="font-size:24px;">👈 왼쪽에 <span style="color:#C9A24B;font-weight:700;">"API 키"</span>를 넣어야 해요</span>
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -4262,7 +5024,7 @@ if not get_api_key():
 
     # 마무리
     st.markdown("""
-    <div style="background:linear-gradient(135deg, #d4af37 0%, #b8860b 100%);padding:30px;border-radius:20px;margin:40px 0;text-align:center;">
+    <div style="background:linear-gradient(135deg, #C9A24B 0%, #A8852F 100%);padding:30px;border-radius:20px;margin:40px 0;text-align:center;">
         <p style="font-size:28px;margin:0 0 10px 0;color:#000;font-weight:800;">
             👈 복사한 키를 왼쪽 사이드바에 붙여넣기
         </p>
@@ -4319,7 +5081,7 @@ if current == 0:
 
         # 빠른 제작 버튼 (자동 모드)
         st.markdown("""
-        <div style="background:linear-gradient(135deg, #d4af37 0%, #b8860b 100%);padding:20px;border-radius:15px;margin:20px 0;text-align:center;">
+        <div style="background:linear-gradient(135deg, #C9A24B 0%, #A8852F 100%);padding:20px;border-radius:15px;margin:20px 0;text-align:center;">
             <p style="font-size:14px;margin:0 0 5px 0;color:#000;opacity:0.8;">⚡ 클릭 한 번으로</p>
             <p style="font-size:20px;margin:0;color:#000;font-weight:800;">목차 + 본문 자동 완성</p>
         </div>
@@ -4474,7 +5236,7 @@ if current == 0:
                         search_url = platform['url'] + search_query
                         st.markdown(f"""
                         <a href="{search_url}" target="_blank" style="text-decoration:none;display:block;margin-bottom:15px;">
-                            <div style="background:rgba(25,25,25,0.9);border:1px solid rgba(212,175,55,0.3);border-radius:16px;overflow:hidden;transition:all 0.3s ease;">
+                            <div style="background:rgba(25,25,25,0.9);border:1px solid rgba(201,162,75,0.3);border-radius:16px;overflow:hidden;transition:all 0.3s ease;">
                                 <div style="height:80px;background:{platform['gradient']};display:flex;align-items:center;justify-content:center;">
                                     <span style="font-size:40px;">{platform['icon']}</span>
                                 </div>
@@ -4733,7 +5495,7 @@ elif current == 2:
                     </div>
                     """, unsafe_allow_html=True)
         else:
-            st.markdown('<div style="text-align:center;padding:60px;background:rgba(255,255,255,0.03);border-radius:16px;border:1px solid rgba(212,175,55,0.15);"><p style="color:rgba(255,255,255,0.5);">분석 버튼을 눌러주세요</p></div>', unsafe_allow_html=True)
+            st.markdown('<div style="text-align:center;padding:60px;background:rgba(255,255,255,0.03);border-radius:16px;border:1px solid rgba(201,162,75,0.15);"><p style="color:rgba(255,255,255,0.5);">분석 버튼을 눌러주세요</p></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="next-section"></div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -5381,7 +6143,7 @@ elif current == 4:
                 # 보기 모드 - 예쁘게 표시
                 for ch_idx, ch in enumerate(st.session_state['outline']):
                     st.markdown(f"""
-                    <div style="background:linear-gradient(135deg, rgba(212,175,55,0.15) 0%, rgba(212,175,55,0.05) 100%);
+                    <div style="background:linear-gradient(135deg, rgba(201,162,75,0.15) 0%, rgba(201,162,75,0.05) 100%);
                                 padding:16px 20px;border-radius:12px;margin-bottom:8px;border-left:4px solid var(--gold);">
                         <span style="color:var(--gold);font-size:13px;font-weight:600;">PART {ch_idx + 1}</span>
                         <p style="color:var(--text);font-size:17px;font-weight:600;margin:8px 0 0 0;">{ch}</p>
@@ -5399,7 +6161,7 @@ elif current == 4:
                     st.markdown("<div style='margin-bottom:20px;'></div>", unsafe_allow_html=True)
 
         else:
-            st.markdown('<div style="text-align:center;padding:60px;background:rgba(255,255,255,0.03);border-radius:16px;border:1px solid rgba(212,175,55,0.15);"><p style="color:rgba(255,255,255,0.5);">목차를 생성해주세요</p></div>', unsafe_allow_html=True)
+            st.markdown('<div style="text-align:center;padding:60px;background:rgba(255,255,255,0.03);border-radius:16px;border:1px solid rgba(201,162,75,0.15);"><p style="color:rgba(255,255,255,0.5);">목차를 생성해주세요</p></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="next-section"></div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -5523,7 +6285,7 @@ elif current == 5:
                             background:#ffffff !important;
                             padding:25px 30px;
                             border-radius:12px;
-                            border:1px solid rgba(212,175,55,0.3);
+                            border:1px solid rgba(201,162,75,0.3);
                             margin:15px 0;
                             font-family:'S-CoreDream', sans-serif !important;
                             font-size:17px;
@@ -5583,7 +6345,7 @@ elif current == 5:
                                 st_data['content'] = edited
                                 st.rerun()
                     else:
-                        st.markdown('<div style="text-align:center;padding:80px 20px;background:rgba(255,255,255,0.03);border-radius:12px;border:1px dashed rgba(212,175,55,0.3);"><p style="color:var(--text2);font-size:16px;">본문이 아직 없습니다<br>질문에 답변 후 "본문 생성" 버튼을 누르세요</p></div>', unsafe_allow_html=True)
+                        st.markdown('<div style="text-align:center;padding:80px 20px;background:rgba(255,255,255,0.03);border-radius:12px;border:1px dashed rgba(201,162,75,0.3);"><p style="color:var(--text2);font-size:16px;">본문이 아직 없습니다<br>질문에 답변 후 "본문 생성" 버튼을 누르세요</p></div>', unsafe_allow_html=True)
             else:
                 st.info("이 챕터에는 소제목이 없습니다. 목차를 다시 생성해주세요.")
 
@@ -5678,6 +6440,42 @@ JSON 형식으로 응답:
                 st.session_state['canva_keyword'] = sug.get('canva_search_keyword', '')
 
     with col2:
+        st.markdown("### 표지 미리보기")
+
+        _label_to_id = {v: k for k, v in COVER_TEMPLATES.items()}
+        _choice = st.radio(
+            "표지 스타일",
+            list(_label_to_id.keys()),
+            key="cover_template_choice",
+        )
+        _tmpl = _label_to_id[_choice]
+
+        _svg = build_cover_svg(
+            _tmpl,
+            cover_title or "제목을 입력하세요",
+            cover_subtitle,
+            cover_author,
+        )
+        st.markdown(
+            '<div style="max-width:320px;margin:12px auto 18px;border-radius:8px;'
+            'overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,0.55);">'
+            f'{_svg}</div>',
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "표지 다운로드 (SVG · 고해상도 벡터)",
+            _svg,
+            file_name=f"{(cover_title or 'cover')}_cover.svg",
+            mime="image/svg+xml",
+            use_container_width=True,
+            key="cover_svg_dl",
+        )
+        st.caption(
+            "SVG는 무손실 벡터 파일입니다. 브라우저에서 열어 캡처하거나, "
+            "Canva·Figma·미리캔버스에 올려 PNG/JPG로 내보낼 수 있습니다."
+        )
+
+        st.markdown("---")
         st.markdown("### Canva로 표지 만들기")
 
         st.markdown("""
@@ -5888,4 +6686,17 @@ elif current == 7:
             st.rerun()
 
 
-st.markdown('<div class="footer">Writey PRO</div>', unsafe_allow_html=True)
+st.markdown("""
+<div style="
+    text-align: center;
+    padding: 30px 20px;
+    margin-top: 50px;
+    border-top: 1px solid rgba(201,162,75,0.3);
+    color: #ffffff !important;
+    font-size: 16px;
+    letter-spacing: 2px;
+    background: rgba(0,0,0,0.3);
+">
+    <span style="color: #C9A24B;">CASHMAKER</span> | 제작: <span style="color: #ffffff;">남현우 작가</span>
+</div>
+""", unsafe_allow_html=True)
